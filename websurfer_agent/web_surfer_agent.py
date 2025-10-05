@@ -35,15 +35,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from browser_playwright import PlaywrightController
 from browser_playwright.browser import LocalPlaywrightBrowser
 from .tool_definitions import ALL_TOOLS, set_browser_controller
-from .prompts import (
-    WEB_SURFER_SYSTEM_MESSAGE,
-    WEB_SURFER_TOOL_PROMPT,
-    WEB_SURFER_NO_TOOLS_PROMPT,
-    WEB_SURFER_OCR_PROMPT,
-    WEB_SURFER_QA_SYSTEM_MESSAGE,
-    WEB_SURFER_QA_PROMPT,
-    EXPLANATION_TOOL_PROMPT,
-)
+# Note: These prompts are kept for reference but NOT used by smolagents
+# Smolagents' CodeAgent auto-generates prompts from Tool class definitions
+# from .prompts import WEB_SURFER_SYSTEM_MESSAGE, etc.
 from .set_of_mark import add_set_of_mark
 
 

@@ -15,12 +15,18 @@ You will also be given a request that you need to complete that you need to infe
 You have access to the following tools:
 - stop_action: Perform no action and provide an answer with a summary of past actions and observations
 - answer_question: Used to answer questions about the current webpage's content
+- summarize_page: Uses AI to summarize the entire page
 - click: Click on a target element using its ID
+- click_full: Click on a target element with optional hold duration and button type
 - hover: Hover the mouse over a target element using its ID
 - input_text: Type text into an input field, with options to delete existing text and press enter
 - select_option: Select an option from a dropdown/select menu
 - scroll_up: Scroll the viewport up towards the beginning
 - scroll_down: Scroll the viewport down towards the end
+- page_up: Scroll the entire browser viewport one page UP towards the beginning
+- page_down: Scroll the entire browser viewport one page DOWN towards the end
+- scroll_element_up: Scrolls a given html element (e.g., a div or a menu) UP
+- scroll_element_down: Scrolls a given html element (e.g., a div or a menu) DOWN
 - visit_url: Navigate directly to a provided URL
 - web_search: Perform a web search query on a search engine
 - history_back: Go back one page in browser history
@@ -105,15 +111,21 @@ In this screenshot, interactive elements are outlined in bounding boxes in red. 
 
 You have access to the following tools and you must use a single tool to respond to the request:
 - tool_name: "stop_action", tool_args: {{"answer": str}} - Provide an answer with a summary of past actions and observations. The answer arg contains your response to the user.
+- tool_name: "answer_question", tool_args: {{"question": str}} - Use to answer questions about the webpage. The question arg specifies what to answer about the page content.
+- tool_name: "summarize_page", tool_args: {{}} - Uses AI to summarize the entire page.
 - tool_name: "click", tool_args: {{"target_id": int}} - Click on a target element. The target_id arg specifies which element to click.
+- tool_name: "click_full", tool_args: {{"target_id": int, "hold": float, "button": str}} - Click on a target element with optional hold duration and button type. hold is seconds to hold mouse button (default 0.0), button is "left" or "right" (default "left").
 - tool_name: "hover", tool_args: {{"target_id": int}} - Hover the mouse over a target element. The target_id arg specifies which element to hover over.
 - tool_name: "input_text", tool_args: {{"input_field_id": int, "text_value": str, "press_enter": bool, "delete_existing_text": bool}} - Type text into an input field. input_field_id specifies which field to type in, text_value is what to type, press_enter determines if Enter key is pressed after typing, delete_existing_text determines if existing text should be cleared first.
 - tool_name: "select_option", tool_args: {{"target_id": int}} - Select an option from a dropdown/select menu. The target_id arg specifies which option to select.
 - tool_name: "scroll_up", tool_args: {{}} - Scroll the viewport up towards the beginning
 - tool_name: "scroll_down", tool_args: {{}} - Scroll the viewport down towards the end
+- tool_name: "page_up", tool_args: {{}} - Scroll the entire browser viewport one page UP towards the beginning
+- tool_name: "page_down", tool_args: {{}} - Scroll the entire browser viewport one page DOWN towards the end
+- tool_name: "scroll_element_up", tool_args: {{"target_id": int}} - Scrolls a given html element (e.g., a div or a menu) UP. The target_id arg specifies which element to scroll.
+- tool_name: "scroll_element_down", tool_args: {{"target_id": int}} - Scrolls a given html element (e.g., a div or a menu) DOWN. The target_id arg specifies which element to scroll.
 - tool_name: "visit_url", tool_args: {{"url": str}} - Navigate directly to a URL. The url arg specifies where to navigate to.
 - tool_name: "web_search", tool_args: {{"query": str}} - Perform a web search on a search engine. The query arg is the search term to use.
-- tool_name: "answer_question", tool_args: {{"question": str}} - Use to answer questions about the webpage. The question arg specifies what to answer about the page content.
 - tool_name: "history_back", tool_args: {{}} - Go back one page in browser history
 - tool_name: "refresh_page", tool_args: {{}} - Refresh the current page
 - tool_name: "keypress", tool_args: {{"keys": list[str]}} - Press one or more keyboard keys in sequence
