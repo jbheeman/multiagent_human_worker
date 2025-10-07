@@ -325,6 +325,25 @@ class PlaywrightController:
             await page.evaluate("WebSurfer.getVisualViewport();")
         )
 
+    async def get_screenshot(self, page: Page, path: Optional[str] = None) -> bytes:
+        """
+        Take a screenshot of the current page.
+
+        Args:
+            page (Page): The Playwright page object.
+            path (Optional[str]): Path to save the screenshot. If None, returns bytes only.
+
+        Returns:
+            bytes: The screenshot as PNG bytes.
+        """
+        await self._ensure_page_ready(page)
+        screenshot_bytes = await page.screenshot(
+            type="png",
+            path=path,
+            full_page=False,  # Only capture viewport, not full page
+        )
+        return screenshot_bytes
+
     async def get_focused_rect_id(self, page: Page) -> str:
         """
         Retrieve the ID of the currently focused element.

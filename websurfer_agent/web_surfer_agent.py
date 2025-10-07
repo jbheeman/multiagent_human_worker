@@ -34,7 +34,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from browser_playwright import PlaywrightController
 from browser_playwright.browser import LocalPlaywrightBrowser
-from .tool_definitions import ALL_TOOLS, set_browser_controller
+from .tool_definitions import ALL_TOOLS, set_browser_controller, set_id_mapping
 from .prompts import WEB_SURFER_SYSTEM_MESSAGE
 from .set_of_mark import add_set_of_mark
 
@@ -173,20 +173,74 @@ class WebSurferAgent:
         else:
             self.is_multimodal = False
 
+    def _screenshot_callback(self, memory_step, agent):
+        """Callback to capture annotated screenshots after each step."""
+        import asyncio
+        
+        # Get the current event loop or create one
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        # Get annotated screenshot
+        try:
+            annotated_img, visible_ids, ids_above, ids_below, id_mapping = loop.run_until_complete(
+                self._get_annotated_screenshot()
+            )
+            
+            # Store ID mapping for tool execution
+            self._current_id_mapping = id_mapping
+            # Also set it globally so tools can access it
+            set_id_mapping(id_mapping)
+            
+            # Resize for optimal tokens (matches magentic-ui sizing)
+            resized_img = annotated_img.resize((self.MLM_WIDTH, self.MLM_HEIGHT))
+            
+            # Attach to memory step for VLM to see
+            memory_step.observations_images = [resized_img.copy()]
+            
+            # Add marker information to observations text
+            marker_info = f"""
+[Screenshot with numbered markers attached]
+Interactive elements on current page:
+- Visible elements: {', '.join(visible_ids) if visible_ids else 'none visible'}
+- Elements above (scroll up): {', '.join(ids_above) if ids_above else 'none'}
+- Elements below (scroll down): {', '.join(ids_below) if ids_below else 'none'}
+
+To interact with elements, use their numbered markers from the screenshot.
+Example: To click element marked "5", use tool_name(target_id="5")
+"""
+            
+            # Add to observations
+            if memory_step.observations:
+                memory_step.observations += "\n" + marker_info
+            else:
+                memory_step.observations = marker_info
+                
+        except Exception as e:
+            self.logger.error(f"Error in screenshot callback: {e}")
+    
     def _create_agent(self):
-        """Create the underlying smol agents CodeAgent."""
+        """Create the underlying smol agents CodeAgent with vision support."""
         if not self.model:
             raise ValueError("Model is required to create WebSurfer agent")
         
         # Set the browser controller for all tools to use
         set_browser_controller(self._playwright_controller)
         
-        # Create the agent with all the WebSurfer tools directly
-        # The tools are already proper smolagents Tool objects
+        # Create the agent with vision support via step callbacks
+        # The callback will capture annotated screenshots after each action
         self.agent = CodeAgent(
             tools=ALL_TOOLS,
             model=self.model,
+            step_callbacks=[self._screenshot_callback],  # Enable vision!
+            max_steps=self.max_actions_per_step,
         )
+        
+        # Initialize ID mapping storage
+        self._current_id_mapping = {}
 
     async def _execute_browser_action(self, tool_name: str, args: Dict[str, Any], result: Dict[str, Any]):
         """Execute the actual browser action based on the tool."""
@@ -277,6 +331,48 @@ class WebSurferAgent:
             return
         if not os.path.isdir(self.debug_dir):
             os.makedirs(self.debug_dir, exist_ok=True)
+
+    async def _get_annotated_screenshot(
+        self
+    ) -> Tuple[PIL.Image.Image, List[str], List[str], List[str], Dict[str, str]]:
+        """
+        Get an annotated screenshot with numbered markers for interactive elements.
+        
+        Returns:
+            Tuple containing:
+            - PIL.Image.Image: Annotated image with numbered markers
+            - List[str]: IDs of visible elements  
+            - List[str]: IDs of elements above viewport (scroll up to see)
+            - List[str]: IDs of elements below viewport (scroll down to see)
+            - Dict[str, str]: Mapping from display IDs to real element IDs
+        """
+        page = self._playwright_controller._page
+        if not page:
+            # Return empty/default values if no page
+            blank_img = PIL.Image.new('RGB', (self.MLM_WIDTH, self.MLM_HEIGHT), color='white')
+            return blank_img, [], [], [], {}
+        
+        # 1. Get interactive elements from the page
+        interactive_regions = await self._playwright_controller.get_interactive_rects(page)
+        
+        # 2. Take screenshot
+        screenshot_bytes = await self._playwright_controller.get_screenshot(page)
+        
+        # 3. Annotate with numbered markers
+        annotated_image, visible_ids, ids_above, ids_below, id_mapping = add_set_of_mark(
+            screenshot=screenshot_bytes,
+            ROIs=interactive_regions,
+            use_sequential_ids=True  # Use 1, 2, 3... instead of element IDs
+        )
+        
+        # 4. Save debug screenshot if enabled
+        if self.to_save_screenshots and self.debug_dir:
+            timestamp = int(time.time())
+            debug_path = os.path.join(self.debug_dir, f"screenshot_annotated_{timestamp}.png")
+            annotated_image.save(debug_path)
+            self.logger.debug(f"Saved annotated screenshot to {debug_path}")
+        
+        return annotated_image, visible_ids, ids_above, ids_below, id_mapping
 
     async def run(self, request: str) -> str:
         """Run the WebSurfer agent with a given request."""

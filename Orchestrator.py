@@ -49,7 +49,7 @@ manager_agent = ToolCallingAgent(
 
 # Run the agent with the query
 answer = manager_agent.run(
-    "Good stocks to buy, and write a file in the current directory called good_stocks.txt that is a report of your findings"
+    "Find information on the newest trends in AI visit the website of NVIDIA, and write a file in the current directory called trends.txt that is a report of your findings"
 )
 
 # answer = manager_agent.run("What is the weather in Tokyo?")

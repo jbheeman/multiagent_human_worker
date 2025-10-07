@@ -17,6 +17,8 @@ DEFAULT_EXPLANATION = "Performing browser action."
 
 # Global browser controller instance that will be set by WebSurferAgent
 _browser_controller: Optional['PlaywrightController'] = None
+# Global ID mapping for Set of Mark (maps display IDs like "5" to real element IDs)
+_id_mapping: Dict[str, str] = {}
 
 def set_browser_controller(controller: 'PlaywrightController'):
     """Set the global browser controller for all tools."""
@@ -26,6 +28,25 @@ def set_browser_controller(controller: 'PlaywrightController'):
 def get_browser_controller() -> Optional['PlaywrightController']:
     """Get the global browser controller."""
     return _browser_controller
+
+def set_id_mapping(mapping: Dict[str, str]):
+    """Set the ID mapping for Set of Mark."""
+    global _id_mapping
+    _id_mapping = mapping
+
+def get_real_element_id(display_id: str) -> str:
+    """
+    Map a display ID (from Set of Mark) to the real element ID.
+    If no mapping exists, return the original ID (backward compatible).
+    
+    Args:
+        display_id: The ID shown in the annotated screenshot (e.g., "5")
+    
+    Returns:
+        The real element ID to use with Playwright (e.g., "element_xyz")
+    """
+    global _id_mapping
+    return _id_mapping.get(display_id, display_id)
 
 # Tool definitions for WebSurfer agent
 class VisitUrlTool(Tool):
@@ -334,8 +355,11 @@ class ClickTool(Tool):
             if page is None:
                 return "Error: No page available."
             
+            # Map display ID to real element ID (for Set of Mark support)
+            real_id = get_real_element_id(str(target_id))
+            
             # Click the element
-            loop.run_until_complete(controller.click_id(context, page, str(target_id)))
+            loop.run_until_complete(controller.click_id(context, page, real_id))
             
             # Give page a moment to start loading
             time.sleep(2)
@@ -425,8 +449,12 @@ class InputTextTool(Tool):
             page = controller._page
             if page is None:
                 return "Error: No page available."
+            
+            # Map display ID to real element ID (for Set of Mark support)
+            real_id = get_real_element_id(str(input_field_id))
+            
             loop.run_until_complete(controller.fill_id(
-                page, str(input_field_id), text_value, 
+                page, real_id, text_value, 
                 press_enter=press_enter, clear=delete_existing_text
             ))
             return f"Typed '{text_value}' into field {input_field_id}"
@@ -468,7 +496,11 @@ class HoverTool(Tool):
             page = controller._page
             if page is None:
                 return "Error: No page available."
-            loop.run_until_complete(controller.hover_id(page, str(target_id)))
+            
+            # Map display ID to real element ID (for Set of Mark support)
+            real_id = get_real_element_id(str(target_id))
+            
+            loop.run_until_complete(controller.hover_id(page, real_id))
             return f"Hovered over element with ID {target_id}"
         except Exception as e:
             return f"Error hovering over element {target_id}: {str(e)}"
@@ -659,7 +691,11 @@ class SelectOptionTool(Tool):
             page = controller._page
             if page is None:
                 return "Error: No page available."
-            loop.run_until_complete(controller.select_option(page, str(target_id)))
+            
+            # Map display ID to real element ID (for Set of Mark support)
+            real_id = get_real_element_id(str(target_id))
+            
+            loop.run_until_complete(controller.select_option(page, real_id))
             return f"Selected option with ID {target_id}"
         except Exception as e:
             return f"Error selecting option {target_id}: {str(e)}"
@@ -990,9 +1026,12 @@ class ClickFullTool(Tool):
             if page is None:
                 return "Error: No page available."
             
+            # Map display ID to real element ID (for Set of Mark support)
+            real_id = get_real_element_id(str(target_id))
+            
             # Click with specified button and hold duration
             loop.run_until_complete(controller.click_id(
-                context, page, str(target_id), 
+                context, page, real_id, 
                 button=button, delay=int(hold * 1000)
             ))
             
@@ -1048,7 +1087,11 @@ class ScrollElementDownTool(Tool):
             page = controller._page
             if page is None:
                 return "Error: No page available."
-            loop.run_until_complete(controller.scroll_element(page, str(target_id), "down"))
+            
+            # Map display ID to real element ID (for Set of Mark support)
+            real_id = get_real_element_id(str(target_id))
+            
+            loop.run_until_complete(controller.scroll_element(page, real_id, "down"))
             return f"Scrolled element {target_id} down"
         except Exception as e:
             return f"Error scrolling element down: {str(e)}"
@@ -1088,7 +1131,11 @@ class ScrollElementUpTool(Tool):
             page = controller._page
             if page is None:
                 return "Error: No page available."
-            loop.run_until_complete(controller.scroll_element(page, str(target_id), "up"))
+            
+            # Map display ID to real element ID (for Set of Mark support)
+            real_id = get_real_element_id(str(target_id))
+            
+            loop.run_until_complete(controller.scroll_element(page, real_id, "up"))
             return f"Scrolled element {target_id} up"
         except Exception as e:
             return f"Error scrolling element up: {str(e)}"
