@@ -3,7 +3,7 @@ Defines the toolset and the shared browser instance for the FileSurfer agent.
 """
 import os
 from smolagents import tool
-from markdown_file_browser import MarkdownFileBrowser
+from .markdown_file_browser import MarkdownFileBrowser
 
 # This browser instance will be shared by all the tool functions.
 # It is initialized by the FileSurfer agent.

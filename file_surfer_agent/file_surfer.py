@@ -1,9 +1,9 @@
 # file_surfer.py
 from smolagents import CodeAgent, LiteLLMModel
-from markdown_file_browser import MarkdownFileBrowser
+from .markdown_file_browser import MarkdownFileBrowser
 
-from prompts import DETAILED_SYSTEM_PROMPT
-import file_tools
+from .prompts import DETAILED_SYSTEM_PROMPT
+from . import file_tools
 
 class FileSurfer:
     """A self-contained agent that uses function-based tools."""

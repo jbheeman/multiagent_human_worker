@@ -7,6 +7,9 @@ from smolagents import (
 )
 
 from websurfer_agent import WebSurferTool
+from file_surfer_agent import FileSurferTool
+
+
 
 # Create the model that will be used by both the orchestrator and the web surfer
 model = OpenAIServerModel(
@@ -18,16 +21,23 @@ model = OpenAIServerModel(
 # Create the WebSurfer tool with the same model
 web_surfer_tool = WebSurferTool(model=model)
 
-# Create the manager agent with the web surfer as a tool
+# Create the FileSurfer tool with the same model
+file_surfer_tool = FileSurferTool(
+    model=model,
+    base_path=".",  # Current directory - change this to restrict access to a specific folder
+    viewport_size=8192
+)
+
+# Create the manager agent with both tools
 manager_agent = CodeAgent(
-    tools=[web_surfer_tool, WebSearchTool()],
+    tools=[web_surfer_tool, file_surfer_tool, WebSearchTool()],
     model=model,
     additional_authorized_imports=["time", "numpy", "pandas"],
 )
 
 # Run the agent with the query
 answer = manager_agent.run(
-    "Find when Professor Mohsen Lesani's office hours are at UCSC for spring 2025."
+    "Good stocks to buy, and write a file in the current directory called good_stocks.txt"
 )
 
 # answer = manager_agent.run("What is the weather in Tokyo?")

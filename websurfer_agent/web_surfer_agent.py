@@ -35,9 +35,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from browser_playwright import PlaywrightController
 from browser_playwright.browser import LocalPlaywrightBrowser
 from .tool_definitions import ALL_TOOLS, set_browser_controller
-# Note: These prompts are kept for reference but NOT used by smolagents
-# Smolagents' CodeAgent auto-generates prompts from Tool class definitions
-# from .prompts import WEB_SURFER_SYSTEM_MESSAGE, etc.
+from .prompts import WEB_SURFER_SYSTEM_MESSAGE
 from .set_of_mark import add_set_of_mark
 
 
@@ -295,8 +293,25 @@ class WebSurferAgent:
                 "content": request
             })
             
-            # Run the agent
-            result = self.agent.run(request)
+            # Get current page information
+            page = self._playwright_controller._page
+            current_url = page.url if page else "about:blank"
+            
+            # Build enhanced context with system prompt and current state
+            # Similar to how FileSurfer does it
+            date_today = datetime.now().strftime("%B %d, %Y")
+            system_prompt = WEB_SURFER_SYSTEM_MESSAGE.format(date_today=date_today)
+            
+            initial_context = (
+                f"{system_prompt}\n\n"
+                f"--- CURRENT TASK ---\n"
+                f"USER_REQUEST: {request}\n\n"
+                f"You are currently viewing: {current_url}\n\n"
+                f"Begin your work. Use the available tools to complete the task.\n"
+            )
+            
+            # Run the agent with enhanced context
+            result = self.agent.run(initial_context)
             
             # Add to chat history
             self._chat_history.append({
