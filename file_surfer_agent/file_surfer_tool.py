@@ -10,30 +10,21 @@ class FileSurferTool(Tool):
     """A tool that wraps the FileSurfer agent to make it usable by the smolagents orchestrator."""
     
     name = "file_surfer"
-    description = """Use this tool to browse and analyze files and directories in the local filesystem.
-    
-    The file surfer can:
-    - List files and directories
-    - Open and read file contents
-    - Navigate through file structure
-    - Search for specific text within files
-    - Page through large files
-    - Answer questions about file contents
-    
-    This tool performs multiple file operations sequentially to complete a task in a single call.
-    For example, it can list a directory, open a file, search for specific content, and answer a question all in one execution.
-    
-    Use this tool when you need to:
-    - Explore directory structures
-    - Read and analyze file contents
-    - Find specific information in files
-    - Get an overview of a codebase or project
-    """
+    description = (
+        "Delegates a complex, multi-step file system task to a specialist agent. This tool is for any task that "
+        "requires finding information within the project's local files. It is strictly read-only.\n"
+        "The specialist agent has the following capabilities:\n"
+        "- Navigate the file system by listing directory contents and opening files.\n"
+        "- Read the full contents of files, paging through large files when necessary.\n"
+        "- Search for specific text, keywords, or code snippets within any file.\n"
+        "- Analyze file contents to answer questions or summarize information.\n"
+        "- Operate within a secure, sandboxed directory."
+    )
     
     inputs = {
         "task": {
             "type": "string",
-            "description": "The task to perform using the file browser. Be specific about what files or information you want to access.",
+            "description": "A clear and specific instruction for the file browsing task to be performed.",
         }
     }
     output_type = "string"
@@ -81,4 +72,3 @@ class FileSurferTool(Tool):
             return result
         except Exception as e:
             return f"Error executing file surfer task: {str(e)}"
-

@@ -26,7 +26,7 @@ web_surfer_tool = WebSurferTool(model=model)
 file_surfer_tool = FileSurferTool(
     model=model,
     base_path=".",  # Current directory - change this to restrict access to a specific folder
-    viewport_size=8192
+    viewport_size=2048
 )
 
 # Create the Coder tool with the same model
