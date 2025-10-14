@@ -46,5 +46,3 @@ class FileSurfer:
         )
         result = self._agent.run(initial_context)
         return result
-
-# ... (your __main__ section for running the agent can go here) ...

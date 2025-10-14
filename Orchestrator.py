@@ -1,60 +1,112 @@
 import os
+from pathlib import Path
+
 from smolagents import (
-    CodeAgent,
     ToolCallingAgent,
     OpenAIServerModel,
     WebSearchTool,
 )
 
-from websurfer_agent import WebSurferTool
-from file_surfer_agent import FileSurferTool
-from coder_agent import CoderTool
+# Tools
+from websurfer_agent.web_surfer_tool import WebSurferTool
+from file_surfer_agent.file_surfer_tool import FileSurferTool
+from coder_agent.coder_tool import CoderTool
+# Correctly import the factory function instead of the old class name
+from common_tools.llm_chat_tool import create_llm_chat_tool
+
+# Planner and state manager
+from planning_agent.planning_agent import PlanningAgent
+from planning_agent.plan_state_manager import PlanStateManager
 
 
+def main():
+    """
+    The main orchestration logic.
+    """
+    print("--- 🚀 Initializing Orchestrator ---")
 
-# Create the model that will be used by both the orchestrator and the web surfer
-model = OpenAIServerModel(
-    model_id="gemma3",
-    api_base="https://ellm.nrp-nautilus.io/v1",
-    api_key=os.environ["NAUT_API_KEY"],
-)
+    # 1. Initialize the shared model
+    model = OpenAIServerModel(
+        model_id="gemma3",
+        api_base="https://ellm.nrp-nautilus.io/v1",
+        api_key=os.environ.get("NAUT_API_KEY", "your_default_api_key"),
+    )
 
-# Create the WebSurfer tool with the same model
-web_surfer_tool = WebSurferTool(model=model)
+    # 2. Initialize the Planning Agent
+    planner = PlanningAgent(model=model)
 
-# Create the FileSurfer tool with the same model
-file_surfer_tool = FileSurferTool(
-    model=model,
-    base_path=".",  # Current directory - change this to restrict access to a specific folder
-    viewport_size=2048
-)
+    # 3. Initialize the Worker/Manager Agent with its tools
+    web_surfer_tool = WebSurferTool(model=model)
+    file_surfer_tool = FileSurferTool(
+        model=model,
+        base_path=str(Path.cwd()),
+        viewport_size=2048,
+    )
+    coder_tool = CoderTool(
+        model=model,
+        max_debug_rounds=3,
+        use_local_executor=True,
+        work_dir=Path.cwd(),
+    )
+    # Instantiate the tool using the new factory function
+    llm_tool = create_llm_chat_tool(model=model)
 
-# Create the Coder tool with the same model
-# Set work_dir to current directory so files are created here, not in temp sandbox
-from pathlib import Path
-coder_tool = CoderTool(
-    model=model,
-    max_debug_rounds=3,
-    use_local_executor=True,
-    work_dir=Path.cwd()  # Use current working directory instead of temp sandbox
-)
+    manager_agent = ToolCallingAgent(
+        tools=[web_surfer_tool, file_surfer_tool, coder_tool, llm_tool, WebSearchTool()],
+        model=model,
+    )
 
-# Create the manager agent with all tools
-# Use ToolCallingAgent instead of CodeAgent - it delegates to tools instead of executing code directly
-# This prevents "forbidden function" errors when tools need to use open(), requests, etc.
-manager_agent = ToolCallingAgent(
-    tools=[web_surfer_tool, file_surfer_tool, coder_tool, WebSearchTool()],
-    model=model,
-)
+    # --- Start of the Workflow ---
 
-# Run the agent with the query
-answer = manager_agent.run(
-    "Find information on the newest trends in AI visit the website of NVIDIA, and write a file in the current directory called trends.txt that is a report of your findings"
-)
+    # 4. Get the user's high-level goal
+    user_goal = (
+        "Perform a detailed analysis of planning_agent/planning_agent.py"
+    )
+    print(f"\n🎯 User Goal: {user_goal}")
 
-# answer = manager_agent.run("What is the weather in Tokyo?")
+    # 5. Generate the plan
+    plan = planner.run(user_goal)
 
-print("="*80)
-print("ANSWER:")
-print("="*80)
-print(answer)
+    # 6. Initialize the Plan executor/state manager
+    executor = PlanStateManager(user_goal, plan)
+
+    print("\n--- 🏁 Starting Plan Execution ---")
+
+    # 7. Main execution loop, driven by the orchestrator
+    while not executor.is_finished():
+        current_state = executor.get_current_state()
+        current_task = executor.get_current_step_task()
+
+        print("\n" + "=" * 50)
+        print(f"▶️ Executing Step {current_state.current_step_index + 1}: {current_task}")
+        print("=" * 50)
+
+        prompt = f"""
+Here is the current state of the project, including the overall goal and results from previous steps:
+{current_state.model_dump_json(indent=2)}
+
+Your current, specific task is: "{current_task}"
+
+Analyze the state and the task, choose the best tool, execute it, and return the result of your action.
+The result should be a clear, self-contained piece of information that can be added to the project state.
+"""
+
+        result = manager_agent.run(prompt)
+        result_str = str(result)
+
+        print(f"📝 Result for Step {current_state.current_step_index + 1}: {result_str}")
+
+        # Update the state with the result via the executor
+        executor.update_state(result_str)
+
+    print("\n--- ✅ Plan Execution Finished ---")
+
+    # 8. Display the final state
+    final_state = executor.get_current_state()
+    print("\nFinal Project State:")
+    print(final_state.model_dump_json(indent=2))
+
+
+if __name__ == "__main__":
+    main()
+
