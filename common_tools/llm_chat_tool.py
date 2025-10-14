@@ -1,28 +1,46 @@
 import os
 from smolagents import OpenAIServerModel, tool
+from typing import Optional
+from planning_agent.plan_models import PlanState
 
 
 # To handle the 'model' object, we use a factory function pattern.
-def create_llm_chat_tool(model: OpenAIServerModel):
+def create_llm_chat_tool(model: OpenAIServerModel, plan_state=Optional[PlanState]):
     """
     Factory function that creates and returns the llm_chat tool.
     This pattern allows us to inject the model dependency into the tool's scope
     so it can be used within the decorated function.
+    
+    Args:
+        model: The language model to use
+        plan_state: Optional PlanState object to include results in context
     """
     
     @tool
-    def llm_chat(query: str, context: str = "") -> str:
+    def llm_chat(query: str, context: str = "", include_prior_results: bool = False) -> str:
         """
         Use for general reasoning, summarization, or answering questions based on text.
-        This tool is a direct interface to a powerful language model.
+        This tool is a direct interface to a powerful language model. It automatically
+        receives the results from prior steps.
         
         Args:
             query (str): The specific question to ask or instruction to follow.
             context (str): Optional context (e.g., text from a file) to reason about.
+            include_prior_results (bool): Populates the context with the results of prior steps if true.
         """
+        # Build context from plan_state results if available
+        full_context = context
+        if plan_state and hasattr(plan_state, 'results') and plan_state.results and include_prior_results: 
+            import json
+            results_json = json.dumps(plan_state.results, indent=2)
+            if full_context:
+                full_context = f"Plan results:\n{results_json}\n\nAdditional context:\n{context}"
+            else:
+                full_context = f"Plan results:\n{results_json}"
+        
         # Construct a clear prompt for the underlying model
-        if context:
-            prompt = f"Given the following context:\n\n---\n{context}\n---\n\nPlease respond to the following query: {query}"
+        if full_context:
+            prompt = f"Given the following context:\n\n---\n{full_context}\n---\n\nPlease respond to the following query: {query}"
         else:
             prompt = query
 
