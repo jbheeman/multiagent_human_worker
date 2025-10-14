@@ -35,6 +35,10 @@ class InteractiveRegion(TypedDict):
     role: str
     aria_name: str
     v_scrollable: bool
+    href: str  # URL for links
+    text: str  # Visible text content
+    value: str  # Value for inputs
+    tag: str  # HTML tag name
     rects: List[DOMRectangle]
 
 
@@ -82,6 +86,10 @@ def interactiveregion_from_dict(region: Dict[str, Any]) -> InteractiveRegion:
         role=_get_str(region, "role"),
         aria_name=_get_str(region, "aria-name"),
         v_scrollable=_get_bool(region, "v-scrollable"),
+        href=region.get("href", ""),
+        text=region.get("text", ""),
+        value=region.get("value", ""),
+        tag=region.get("tag", ""),
         rects=typed_rects,
     )
 

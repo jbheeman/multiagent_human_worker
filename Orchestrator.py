@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+import json
 from smolagents import (
     ToolCallingAgent,
     OpenAIServerModel,
@@ -13,6 +14,7 @@ from file_surfer_agent.file_surfer_tool import FileSurferTool
 from coder_agent.coder_tool import CoderTool
 # Correctly import the factory function instead of the old class name
 from common_tools.llm_chat_tool import create_llm_chat_tool
+from simulated_humans.human_tools import create_human_tools
 
 # Planner and state manager
 from planning_agent.planning_agent import PlanningAgent
@@ -31,6 +33,8 @@ def main():
         api_base="https://ellm.nrp-nautilus.io/v1",
         api_key=os.environ.get("NAUT_API_KEY", "your_default_api_key"),
     )
+
+
 
     # 2. Initialize the Planning Agent
     planner = PlanningAgent(model=model)
@@ -51,16 +55,25 @@ def main():
     # Instantiate the tool using the new factory function
     llm_tool = create_llm_chat_tool(model=model)
 
+    USE_SIMULATED_HUMANS = True
+    if USE_SIMULATED_HUMANS:
+        human_tools = create_human_tools(model=model, use_simulated=True)
+    else:
+        human_tools = []
+
+
     manager_agent = ToolCallingAgent(
-        tools=[web_surfer_tool, file_surfer_tool, coder_tool, llm_tool, WebSearchTool()],
+        tools=[web_surfer_tool, file_surfer_tool, coder_tool, llm_tool, WebSearchTool(), *human_tools],
         model=model,
     )
+# Create simulated human tools for human-in-the-loop decisions
+# Set USE_SIMULATED_HUMANS to False to disable human tools (not yet implemented for real humans)
 
     # --- Start of the Workflow ---
 
     # 4. Get the user's high-level goal
     user_goal = (
-        "Perform a detailed analysis of planning_agent/planning_agent.py"
+        "Perform a detailed analysis of web_surfer_agent.py"
     )
     print(f"\n🎯 User Goal: {user_goal}")
 

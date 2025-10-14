@@ -380,11 +380,21 @@ var WebSurfer = WebSurfer || (function () {
             let ariaName = getApproximateAriaName(elements[i]);
             let vScrollable = elements[i].scrollHeight - elements[i].clientHeight >= 1;
 
+            // Extract additional useful attributes
+            let href = elements[i].href || '';
+            let text = elements[i].textContent ? elements[i].textContent.trim().substring(0, 200) : '';
+            let value = elements[i].value || '';
+            let tagName = elements[i].tagName ? elements[i].tagName.toLowerCase() : '';
+
             let record = {
                 "tag_name": ariaRole[1],
                 "role": ariaRole[0],
                 "aria-name": ariaName,
                 "v-scrollable": vScrollable,
+                "href": href,
+                "text": text,
+                "value": value,
+                "tag": tagName,
                 "rects": []
             };
 

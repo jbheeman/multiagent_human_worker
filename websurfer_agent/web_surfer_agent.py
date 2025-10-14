@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from browser_playwright import PlaywrightController
 from browser_playwright.browser import LocalPlaywrightBrowser
 from .tool_definitions import ALL_TOOLS, set_browser_controller, set_id_mapping
-from .prompts import WEB_SURFER_SYSTEM_MESSAGE
+from .prompts import SIMPLE_WEB_SURFER_SYSTEM_MESSAGE
 from .set_of_mark import add_set_of_mark
 
 
@@ -195,8 +195,26 @@ class WebSurferAgent:
             # Also set it globally so tools can access it
             set_id_mapping(id_mapping)
             
+            # ID mapping updated in screenshot callback
+            
             # Resize for optimal tokens (matches magentic-ui sizing)
             resized_img = annotated_img.resize((self.MLM_WIDTH, self.MLM_HEIGHT))
+
+            # Persist the screenshot for debugging/inspection
+            try:
+                import os
+                from datetime import datetime
+                save_dir = os.path.join(os.getcwd(), "websurfer_agent", "screenshots")
+                os.makedirs(save_dir, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                # Save both original annotated and model-sized images
+                annotated_path = os.path.join(save_dir, f"annotated_{ts}.png")
+                resized_path = os.path.join(save_dir, f"mlm_{ts}.png")
+                annotated_img.save(annotated_path)
+                resized_img.save(resized_path)
+            except Exception as save_err:
+                self.logger.debug(f"Failed to save screenshots: {save_err}")
+
             
             # Attach to memory step for VLM to see
             memory_step.observations_images = [resized_img.copy()]
@@ -205,12 +223,13 @@ class WebSurferAgent:
             marker_info = f"""
 [Screenshot with numbered markers attached]
 Interactive elements on current page:
-- Visible elements: {', '.join(visible_ids) if visible_ids else 'none visible'}
-- Elements above (scroll up): {', '.join(ids_above) if ids_above else 'none'}
-- Elements below (scroll down): {', '.join(ids_below) if ids_below else 'none'}
+- Visible elements with markers: {', '.join(visible_ids) if visible_ids else 'none visible'}
+- Elements above viewport (scroll up to see): {', '.join(ids_above) if ids_above else 'none'}
+- Elements below viewport (scroll down to see): {', '.join(ids_below) if ids_below else 'none'}
 
-To interact with elements, use their numbered markers from the screenshot.
-Example: To click element marked "5", use tool_name(target_id="5")
+IMPORTANT: Use ONLY the numbered markers visible in the screenshot to interact with elements.
+Example: To click the element with red box and number "5", use click(target_id=5)
+The page content text is for context only - always use the visual markers for interaction.
 """
             
             # Add to observations
@@ -241,62 +260,6 @@ Example: To click element marked "5", use tool_name(target_id="5")
         
         # Initialize ID mapping storage
         self._current_id_mapping = {}
-
-    async def _execute_browser_action(self, tool_name: str, args: Dict[str, Any], result: Dict[str, Any]):
-        """Execute the actual browser action based on the tool."""
-        try:
-            if not self.did_lazy_init:
-                await self.lazy_init()
-            
-            # Get the current page from the controller
-            page = self._playwright_controller._page
-            if not page:
-                self.logger.error("No page available for browser action")
-                return
-
-            # Execute the appropriate browser action
-            if tool_name == "visit_url":
-                await self._execute_tool_visit_url(args)
-            elif tool_name == "web_search":
-                await self._execute_tool_web_search(args)
-            elif tool_name == "click":
-                await self._execute_tool_click(args)
-            elif tool_name == "input_text":
-                await self._execute_tool_input_text(args)
-            elif tool_name == "hover":
-                await self._execute_tool_hover(args)
-            elif tool_name == "scroll_down":
-                await self._execute_tool_scroll_down(args)
-            elif tool_name == "scroll_up":
-                await self._execute_tool_scroll_up(args)
-            elif tool_name == "history_back":
-                await self._execute_tool_history_back(args)
-            elif tool_name == "refresh_page":
-                await self._execute_tool_refresh_page(args)
-            elif tool_name == "keypress":
-                await self._execute_tool_keypress(args)
-            elif tool_name == "sleep":
-                await self._execute_tool_sleep(args)
-            elif tool_name == "answer_question":
-                await self._execute_tool_answer_question(args)
-            elif tool_name == "select_option":
-                await self._execute_tool_select_option(args)
-            elif tool_name == "create_tab":
-                await self._execute_tool_create_tab(args)
-            elif tool_name == "switch_tab":
-                await self._execute_tool_switch_tab(args)
-            elif tool_name == "close_tab":
-                await self._execute_tool_close_tab(args)
-            elif tool_name == "upload_file":
-                await self._execute_tool_upload_file(args)
-            elif tool_name == "stop_action":
-                # Stop action doesn't need browser interaction
-                pass
-            else:
-                self.logger.warning(f"Unknown tool: {tool_name}")
-                
-        except Exception as e:
-            self.logger.error(f"Error executing browser action {tool_name}: {e}")
 
     async def lazy_init(self) -> None:
         """Initialize the browser and page on first use."""
@@ -393,20 +356,23 @@ Example: To click element marked "5", use tool_name(target_id="5")
             page = self._playwright_controller._page
             current_url = page.url if page else "about:blank"
             
+            # No initial screenshot needed since we start at about:blank
+            marker_info = ""
+            
             # Build enhanced context with system prompt and current state
             # Similar to how FileSurfer does it
             date_today = datetime.now().strftime("%B %d, %Y")
-            system_prompt = WEB_SURFER_SYSTEM_MESSAGE.format(date_today=date_today)
+            system_prompt = SIMPLE_WEB_SURFER_SYSTEM_MESSAGE.format(date_today=date_today)
             
             initial_context = (
                 f"{system_prompt}\n\n"
                 f"--- CURRENT TASK ---\n"
                 f"USER_REQUEST: {request}\n\n"
                 f"You are currently viewing: {current_url}\n\n"
+                f"{marker_info}\n\n"
                 f"Begin your work. Use the available tools to complete the task.\n"
             )
             
-            # Run the agent with enhanced context
             result = self.agent.run(initial_context)
             
             # Add to chat history
@@ -428,187 +394,6 @@ Example: To click element marked "5", use tool_name(target_id="5")
                 await self._browser.__aexit__(None, None, None)
         except Exception as e:
             self.logger.error(f"Error closing WebSurfer: {e}")
-
-    # Tool execution methods (simplified implementations)
-    
-    async def _execute_tool_visit_url(self, args: Dict[str, Any]) -> str:
-        """Execute visit_url tool."""
-        url = args.get("url", "")
-        ret, approved = await self._check_url_and_generate_msg(url)
-        if not approved:
-            return ret
-
-        action_description = f"I navigated to '{url}'."
-        
-        # Mock implementation - in real version this would use playwright
-        self.logger.info(f"Mock visiting URL: {url}")
-        
-        return action_description
-
-    async def _execute_tool_web_search(self, args: Dict[str, Any]) -> str:
-        """Execute web_search tool."""
-        query = args.get("query", "")
-        search_url, domain = self._get_search_url(query)
-        ret, approved = await self._check_url_and_generate_msg(domain)
-        if not approved:
-            return ret
-            
-        action_description = f"I searched for '{query}'."
-        
-        # Mock implementation
-        self.logger.info(f"Mock web search: {query}")
-        
-        return action_description
-
-    async def _execute_tool_click(self, args: Dict[str, Any]) -> str:
-        """Execute click tool."""
-        target_id = args.get("target_id", 0)
-        action_description = f"I clicked on element with ID {target_id}."
-        
-        # Mock implementation
-        self.logger.info(f"Mock clicking element {target_id}")
-        
-        return action_description
-
-    async def _execute_tool_input_text(self, args: Dict[str, Any]) -> str:
-        """Execute input_text tool."""
-        input_field_id = args.get("input_field_id", 0)
-        text_value = args.get("text_value", "")
-        action_description = f"I typed '{text_value}' into field {input_field_id}."
-        
-        # Mock implementation
-        self.logger.info(f"Mock typing '{text_value}' into field {input_field_id}")
-        
-        return action_description
-
-    async def _execute_tool_hover(self, args: Dict[str, Any]) -> str:
-        """Execute hover tool."""
-        target_id = args.get("target_id", 0)
-        action_description = f"I hovered over element with ID {target_id}."
-        
-        # Mock implementation
-        self.logger.info(f"Mock hovering over element {target_id}")
-        
-        return action_description
-
-    async def _execute_tool_scroll_down(self, args: Dict[str, Any]) -> str:
-        """Execute scroll_down tool."""
-        pixels = args.get("pixels", 400)
-        action_description = f"I scrolled down {pixels} pixels."
-        
-        # Mock implementation
-        self.logger.info(f"Mock scrolling down {pixels} pixels")
-        
-        return action_description
-
-    async def _execute_tool_scroll_up(self, args: Dict[str, Any]) -> str:
-        """Execute scroll_up tool."""
-        pixels = args.get("pixels", 400)
-        action_description = f"I scrolled up {pixels} pixels."
-        
-        # Mock implementation
-        self.logger.info(f"Mock scrolling up {pixels} pixels")
-        
-        return action_description
-
-    async def _execute_tool_history_back(self, args: Dict[str, Any]) -> str:
-        """Execute history_back tool."""
-        action_description = "I navigated back in browser history."
-        
-        # Mock implementation
-        self.logger.info("Mock going back in history")
-        
-        return action_description
-
-    async def _execute_tool_refresh_page(self, args: Dict[str, Any]) -> str:
-        """Execute refresh_page tool."""
-        action_description = "I refreshed the current page."
-        
-        # Mock implementation
-        self.logger.info("Mock refreshing page")
-        
-        return action_description
-
-    async def _execute_tool_keypress(self, args: Dict[str, Any]) -> str:
-        """Execute keypress tool."""
-        keys = args.get("keys", [])
-        action_description = f"I pressed keys: {', '.join(keys)}"
-        
-        # Mock implementation
-        self.logger.info(f"Mock pressing keys: {keys}")
-        
-        return action_description
-
-    async def _execute_tool_sleep(self, args: Dict[str, Any]) -> str:
-        """Execute sleep tool."""
-        duration = args.get("duration", 3)
-        action_description = f"I waited {duration} seconds."
-        
-        # Actual sleep
-        await asyncio.sleep(duration)
-        
-        return action_description
-
-    async def _execute_tool_answer_question(self, args: Dict[str, Any]) -> str:
-        """Execute answer_question tool."""
-        question = args.get("question", "")
-        action_description = f"I answered the question: {question}"
-        
-        # Mock implementation - in real version this would analyze page content
-        self.logger.info(f"Mock answering question: {question}")
-        
-        return action_description
-
-    async def _execute_tool_select_option(self, args: Dict[str, Any]) -> str:
-        """Execute select_option tool."""
-        target_id = args.get("target_id", 0)
-        action_description = f"I selected option with ID {target_id}."
-        
-        # Mock implementation
-        self.logger.info(f"Mock selecting option {target_id}")
-        
-        return action_description
-
-    async def _execute_tool_create_tab(self, args: Dict[str, Any]) -> str:
-        """Execute create_tab tool."""
-        url = args.get("url", "")
-        action_description = f"I created a new tab and navigated to {url}."
-        
-        # Mock implementation
-        self.logger.info(f"Mock creating tab with URL: {url}")
-        
-        return action_description
-
-    async def _execute_tool_switch_tab(self, args: Dict[str, Any]) -> str:
-        """Execute switch_tab tool."""
-        tab_index = args.get("tab_index", 0)
-        action_description = f"I switched to tab {tab_index}."
-        
-        # Mock implementation
-        self.logger.info(f"Mock switching to tab {tab_index}")
-        
-        return action_description
-
-    async def _execute_tool_close_tab(self, args: Dict[str, Any]) -> str:
-        """Execute close_tab tool."""
-        tab_index = args.get("tab_index", 0)
-        action_description = f"I closed tab {tab_index}."
-        
-        # Mock implementation
-        self.logger.info(f"Mock closing tab {tab_index}")
-        
-        return action_description
-
-    async def _execute_tool_upload_file(self, args: Dict[str, Any]) -> str:
-        """Execute upload_file tool."""
-        target_id = args.get("target_id", "")
-        file_path = args.get("file_path", "")
-        action_description = f"I uploaded file {file_path} to element {target_id}."
-        
-        # Mock implementation
-        self.logger.info(f"Mock uploading file {file_path} to {target_id}")
-        
-        return action_description
 
     def _get_search_url(self, query: str) -> tuple[str, str]:
         """Get search URL and domain based on configured search engine."""

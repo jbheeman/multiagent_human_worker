@@ -87,23 +87,8 @@ class VisitUrlTool(Tool):
                 return f"Error: No page available. Browser not initialized."
             success, _ = loop.run_until_complete(controller.visit_page(page, url))
             if success:
-                # Get the page content after navigation
-                content = loop.run_until_complete(controller.get_page_markdown(page, max_tokens=5000))
-                
-                # Get interactive elements (links, buttons, etc.) with their IDs
-                interactive_rects = loop.run_until_complete(controller.get_interactive_rects(page))
-                
-                # Format interactive elements for the agent
-                interactive_info = "\n\nClickable elements on this page:\n"
-                for elem_id, elem_data in list(interactive_rects.items())[:20]:  # Limit to first 20
-                    role = elem_data.get('role', 'element')
-                    aria_name = elem_data.get('aria_name', '')
-                    if aria_name:
-                        interactive_info += f"  ID {elem_id}: {role} - {aria_name}\n"
-                    else:
-                        interactive_info += f"  ID {elem_id}: {role}\n"
-                
-                return f"Navigated to {url}\n\nPage content:\n{content}\n{interactive_info}\n\nYou can click on any element using click(target_id=ID)"
+            # Reduced verbosity: only report URL; annotated markers are provided via screenshot callback
+                return f"Navigated to {url}. Use the numbered markers in the latest screenshot to interact."
             else:
                 return f"Failed to navigate to {url}"
         except Exception as e:
@@ -154,20 +139,7 @@ class WebSearchTool(Tool):
                 # Get the search results page content
                 content = loop.run_until_complete(controller.get_page_markdown(page, max_tokens=5000))
                 
-                # Get interactive elements (links, buttons, etc.) with their IDs
-                interactive_rects = loop.run_until_complete(controller.get_interactive_rects(page))
-                
-                # Format interactive elements for the agent
-                interactive_info = "\n\nClickable elements on this page:\n"
-                for elem_id, elem_data in list(interactive_rects.items())[:20]:  # Limit to first 20
-                    role = elem_data.get('role', 'element')
-                    aria_name = elem_data.get('aria_name', '')
-                    if aria_name:
-                        interactive_info += f"  ID {elem_id}: {role} - {aria_name}\n"
-                    else:
-                        interactive_info += f"  ID {elem_id}: {role}\n"
-                
-                return f"Search results for '{query}':\n\n{content}\n{interactive_info}\n\nYou can click on any element using click(target_id=ID)"
+                return f"Search results for '{query}':\n\n{content}\n\nNote: Interactive elements are marked with numbers in the screenshot. Use those numbered markers to interact with elements."
             else:
                 return f"Failed to search for: {query}"
         except Exception as e:
@@ -372,29 +344,8 @@ class ClickTool(Tool):
                 # Page might be slow, but we can still try to get content
                 pass
             
-            # Get the page content after clicking
-            try:
-                content = loop.run_until_complete(controller.get_page_markdown(page, max_tokens=5000))
-            except Exception as e:
-                content = f"Page is still loading or content unavailable. Error: {str(e)}"
-            
-            # Get updated interactive elements
-            try:
-                interactive_rects = loop.run_until_complete(controller.get_interactive_rects(page))
-                
-                # Format interactive elements
-                interactive_info = "\n\nClickable elements on this page:\n"
-                for elem_id, elem_data in list(interactive_rects.items())[:20]:
-                    role = elem_data.get('role', 'element')
-                    aria_name = elem_data.get('aria_name', '')
-                    if aria_name:
-                        interactive_info += f"  ID {elem_id}: {role} - {aria_name}\n"
-                    else:
-                        interactive_info += f"  ID {elem_id}: {role}\n"
-            except Exception:
-                interactive_info = "\n\n(Interactive elements not yet available)"
-            
-            return f"Clicked on element ID {target_id} and navigated to: {page.url}\n\nPage content:\n{content}\n{interactive_info}"
+            # Reduced verbosity: only report action and URL; annotated markers are provided via screenshot callback
+            return f"Clicked element {target_id}. Current URL: {page.url}. Use the numbered markers in the latest screenshot to continue."
         except Exception as e:
             return f"Error clicking element {target_id}: {str(e)}"
 
@@ -455,7 +406,7 @@ class InputTextTool(Tool):
             
             loop.run_until_complete(controller.fill_id(
                 page, real_id, text_value, 
-                press_enter=press_enter, clear=delete_existing_text
+                press_enter=press_enter, delete_existing_text=delete_existing_text
             ))
             return f"Typed '{text_value}' into field {input_field_id}"
         except Exception as e:
@@ -689,13 +640,16 @@ class SelectOptionTool(Tool):
         
         try:
             page = controller._page
+            context = controller._context
             if page is None:
                 return "Error: No page available."
+            if context is None:
+                return "Error: Browser context not available."
             
             # Map display ID to real element ID (for Set of Mark support)
             real_id = get_real_element_id(str(target_id))
             
-            loop.run_until_complete(controller.select_option(page, real_id))
+            loop.run_until_complete(controller.select_option(context, page, real_id))
             return f"Selected option with ID {target_id}"
         except Exception as e:
             return f"Error selecting option {target_id}: {str(e)}"
@@ -1037,18 +991,8 @@ class ClickFullTool(Tool):
             
             # Get updated page content
             content = loop.run_until_complete(controller.get_page_markdown(page, max_tokens=5000))
-            interactive_rects = loop.run_until_complete(controller.get_interactive_rects(page))
             
-            interactive_info = "\n\nClickable elements on this page:\n"
-            for elem_id, elem_data in list(interactive_rects.items())[:20]:
-                role = elem_data.get('role', 'element')
-                aria_name = elem_data.get('aria_name', '')
-                if aria_name:
-                    interactive_info += f"  ID {elem_id}: {role} - {aria_name}\n"
-                else:
-                    interactive_info += f"  ID {elem_id}: {role}\n"
-            
-            return f"Clicked element ID {target_id} with {button} button (hold: {hold}s)\n\nPage content after click:\n{content}\n{interactive_info}"
+            return f"Clicked element ID {target_id} with {button} button (hold: {hold}s)\n\nPage content after click:\n{content}\n\nNote: Interactive elements are marked with numbers in the screenshot. Use those numbered markers to interact with elements."
         except Exception as e:
             return f"Error clicking element {target_id}: {str(e)}"
 

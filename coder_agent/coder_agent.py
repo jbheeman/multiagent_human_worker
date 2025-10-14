@@ -420,16 +420,6 @@ class CoderAgent:
         date_today = datetime.now().strftime("%B %d, %Y")
         system_prompt_coder = CODER_SYSTEM_PROMPT.format(date_today=date_today)
         
-        # Print the system prompt for visibility (like smolagents does)
-        print("\n" + "="*80)
-        print("CODER AGENT SYSTEM PROMPT:")
-        print("="*80)
-        print(system_prompt_coder)
-        print("="*80)
-        print(f"\nTASK: {task}")
-        print(f"WORK DIRECTORY: {self._work_dir}")
-        print("="*80 + "\n")
-        
         # Track inner messages
         inner_messages: List[TextMessage] = []
         executed_code = False
