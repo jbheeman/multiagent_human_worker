@@ -9,11 +9,7 @@ nest_asyncio.apply()
 if TYPE_CHECKING:
     from browser_playwright import PlaywrightController
 
-# Base explanation prompt for all tools
-EXPLANATION_TOOL_PROMPT = "Explain to the user the action to be performed and reason for doing so. Phrase as if you are directly talking to the user."
-
-# Default explanation when none is provided
-DEFAULT_EXPLANATION = "Performing browser action."
+# Removed explanation fields - they were pure token burn
 
 # Global browser controller instance that will be set by WebSurferAgent
 _browser_controller: Optional['PlaywrightController'] = None
@@ -58,15 +54,10 @@ class VisitUrlTool(Tool):
                         "type": "string",
                         "description": "The URL to visit in the browser.",
                     },
-        "explanation": {
-            "type": "string",
-            "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-                },
             }
     output_type = "string"
 
-    def forward(self, url: str, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self, url: str) -> str:
         """Execute the visit_url tool."""
         import asyncio
         controller = get_browser_controller()
@@ -104,15 +95,10 @@ class WebSearchTool(Tool):
                         "type": "string",
                         "description": "The web search query to use.",
                     },
-        "explanation": {
-            "type": "string",
-            "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-                },
             }
     output_type = "string"
 
-    def forward(self, query: str, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self, query: str) -> str:
         """Execute the web_search tool."""
         import asyncio
         from urllib.parse import quote_plus
@@ -151,15 +137,11 @@ class HistoryBackTool(Tool):
     name = "history_back"
     description = "Navigates back one page in the browser's history. This is equivalent to clicking the browser back button."
     inputs = {
-                    "explanation": {
-                        "type": "string",
-                        "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-                    },
+                  
             }
     output_type = "string"
 
-    def forward(self, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self) -> str:
         """Execute the history_back tool."""
         import asyncio
         controller = get_browser_controller()
@@ -187,15 +169,10 @@ class RefreshPageTool(Tool):
     name = "refresh_page"
     description = "Refreshes the current page in the browser. This is equivalent to clicking the browser refresh button or pressing F5."
     inputs = {
-                    "explanation": {
-                        "type": "string",
-                        "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-                    },
             }
     output_type = "string"
 
-    def forward(self, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self) -> str:
         """Execute the refresh_page tool."""
         import asyncio
         controller = get_browser_controller()
@@ -219,19 +196,15 @@ class RefreshPageTool(Tool):
 
 
 class ScrollDownTool(Tool):
-    """Scrolls down on the current page using mouse wheel for 400 pixels."""
+    """Scrolls down on the current page using mouse wheel for 900 pixels."""
     name = "scroll_down"
-    description = "Scrolls down on the current page using mouse wheel for 400 pixels."
+    description = "Scrolls down on the current page using mouse wheel for 900 pixels."
     inputs = {
-                    "explanation": {
-                        "type": "string",
-                        "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-                    },
+                  
             }
     output_type = "string"
 
-    def forward(self, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self) -> str:
         """Execute the scroll_down tool."""
         import asyncio
         controller = get_browser_controller()
@@ -248,26 +221,21 @@ class ScrollDownTool(Tool):
             page = controller._page
             if page is None:
                 return "Error: No page available."
-            loop.run_until_complete(controller.scroll_mousewheel(page, "down", 400))
-            return "Scrolled down 400 pixels"
+            loop.run_until_complete(controller.scroll_mousewheel(page, "down", 900))
+            return "Scrolled down 900 pixels"
         except Exception as e:
             return f"Error scrolling down: {str(e)}"
 
 
 class ScrollUpTool(Tool):
-    """Scrolls up on the current page using mouse wheel for 400 pixels."""
+    """Scrolls up on the current page using mouse wheel for 900 pixels."""
     name = "scroll_up"
-    description = "Scrolls up on the current page using mouse wheel for 400 pixels."
+    description = "Scrolls up on the current page using mouse wheel for 900 pixels."
     inputs = {
-                    "explanation": {
-                        "type": "string",
-                        "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-                    },
             }
     output_type = "string"
 
-    def forward(self, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self) -> str:
         """Execute the scroll_up tool."""
         import asyncio
         controller = get_browser_controller()
@@ -284,8 +252,8 @@ class ScrollUpTool(Tool):
             page = controller._page
             if page is None:
                 return "Error: No page available."
-            loop.run_until_complete(controller.scroll_mousewheel(page, "up", 400))
-            return "Scrolled up 400 pixels"
+            loop.run_until_complete(controller.scroll_mousewheel(page, "up", 900))
+            return "Scrolled up 900 pixels"
         except Exception as e:
             return f"Error scrolling up: {str(e)}"
 
@@ -299,15 +267,10 @@ class ClickTool(Tool):
                         "type": "integer",
                         "description": "The numeric id of the target to click.",
                     },
-        "explanation": {
-            "type": "string",
-            "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-                },
             }
     output_type = "string"
 
-    def forward(self, target_id: int, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self, target_id: int) -> str:
         """Execute the click tool."""
         import asyncio
         import time
@@ -373,17 +336,11 @@ class InputTextTool(Tool):
                         "description": "Whether to delete existing text in the field before inputing the text value.",
             "nullable": True,
         },
-        "explanation": {
-            "type": "string",
-            "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-        },
     }
     output_type = "string"
 
     def forward(self, input_field_id: int, text_value: str, 
-                press_enter: bool = False, delete_existing_text: bool = True, 
-                explanation: str = DEFAULT_EXPLANATION) -> str:
+                press_enter: bool = False, delete_existing_text: bool = True) -> str:
         """Execute the input_text tool."""
         import asyncio
         controller = get_browser_controller()
@@ -422,15 +379,10 @@ class HoverTool(Tool):
                         "type": "integer",
                         "description": "The numeric id of the target to hover over.",
                     },
-        "explanation": {
-            "type": "string",
-            "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-                },
             }
     output_type = "string"
 
-    def forward(self, target_id: int, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self, target_id: int) -> str:
         """Execute the hover tool."""
         import asyncio
         controller = get_browser_controller()
@@ -467,15 +419,10 @@ class KeypressTool(Tool):
                         "items": {"type": "string"},
                         "description": "List of keys to press in sequence. For special keys, use their full name (e.g. 'Enter', 'Tab', etc.).",
                     },
-        "explanation": {
-            "type": "string",
-            "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-                },
             }
     output_type = "string"
 
-    def forward(self, keys: list, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self, keys: list) -> str:
         """Execute the keypress tool."""
         import asyncio
         controller = get_browser_controller()
@@ -507,15 +454,10 @@ class ReadPageAndAnswerTool(Tool):
                         "type": "string",
                         "description": "The question to answer. Do not ask any follow up questions or say that you can help with more things.",
                     },
-        "explanation": {
-            "type": "string",
-            "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-                },
             }
     output_type = "string"
 
-    def forward(self, question: str, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self, question: str) -> str:
         """Execute the answer_question tool."""
         import asyncio
         controller = get_browser_controller()
@@ -567,10 +509,6 @@ class SleepTool(Tool):
     name = "sleep"
     description = "Wait a specified period of time in seconds (default 3 seconds). Call this function if the page has not yet fully loaded, or if it is determined that a small delay would increase the task's chances of success."
     inputs = {
-                    "explanation": {
-                        "type": "string",
-                        "description": EXPLANATION_TOOL_PROMPT,
-                    },
                     "duration": {
                         "type": "number",
                         "description": "The number of seconds to wait. Default is 3 seconds.",
@@ -579,7 +517,7 @@ class SleepTool(Tool):
             }
     output_type = "string"
 
-    def forward(self, explanation: str, duration: float = 3.0) -> str:
+    def forward(self, duration: float = 3.0) -> str:
         """Execute the sleep tool."""
         import time
         time.sleep(duration)
@@ -595,15 +533,10 @@ class StopActionTool(Tool):
                         "type": "string",
                         "description": "The answer to the request and a complete summary of past actions and observations. Phrase using first person and as if you are directly talking to the user. Do not ask any questions or say that you can help with more things.",
                     },
-        "explanation": {
-            "type": "string",
-            "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-                },
             }
     output_type = "string"
 
-    def forward(self, answer: str, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self, answer: str) -> str:
         """Execute the stop_action tool."""
         return answer
 
@@ -617,15 +550,10 @@ class SelectOptionTool(Tool):
                         "type": "integer",
                         "description": "The numeric id of the option to select.",
                     },
-        "explanation": {
-            "type": "string",
-            "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-                },
             }
     output_type = "string"
 
-    def forward(self, target_id: int, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self, target_id: int) -> str:
         """Execute the select_option tool."""
         import asyncio
         controller = get_browser_controller()
@@ -664,15 +592,10 @@ class CreateTabTool(Tool):
                         "type": "string",
                         "description": "The URL to open in the new tab.",
                     },
-        "explanation": {
-            "type": "string",
-            "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-                },
             }
     output_type = "string"
 
-    def forward(self, url: str, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self, url: str) -> str:
         """Execute the create_tab tool."""
         import asyncio
         controller = get_browser_controller()
@@ -711,15 +634,10 @@ class SwitchTabTool(Tool):
                         "type": "integer",
                         "description": "The index of the tab to switch to (0-based).",
                     },
-        "explanation": {
-            "type": "string",
-            "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-                },
             }
     output_type = "string"
 
-    def forward(self, tab_index: int, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self, tab_index: int) -> str:
         """Execute the switch_tab tool."""
         import asyncio
         controller = get_browser_controller()
@@ -762,15 +680,10 @@ class CloseTabTool(Tool):
                         "type": "integer",
                         "description": "The index of the tab to close (0-based).",
                     },
-        "explanation": {
-            "type": "string",
-            "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-                },
             }
     output_type = "string"
 
-    def forward(self, tab_index: int, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self, tab_index: int) -> str:
         """Execute the close_tab tool."""
         import asyncio
         controller = get_browser_controller()
@@ -824,15 +737,10 @@ class UploadFileTool(Tool):
                         "type": "string",
                         "description": "The path to the file to be uploaded.",
                     },
-        "explanation": {
-            "type": "string",
-            "description": "The explanation of the action to be performed.",
-            "nullable": True,
-                },
             }
     output_type = "string"
 
-    def forward(self, target_id: str, file_path: str, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self, target_id: str, file_path: str) -> str:
         """Execute the upload_file tool."""
         import asyncio
         import os
@@ -866,15 +774,10 @@ class PageUpTool(Tool):
     name = "page_up"
     description = "Scrolls the entire browser viewport one page UP towards the beginning."
     inputs = {
-        "explanation": {
-            "type": "string",
-            "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-        },
     }
     output_type = "string"
 
-    def forward(self, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self) -> str:
         """Execute the page_up tool."""
         import asyncio
         controller = get_browser_controller()
@@ -902,15 +805,10 @@ class PageDownTool(Tool):
     name = "page_down"
     description = "Scrolls the entire browser viewport one page DOWN towards the end."
     inputs = {
-        "explanation": {
-            "type": "string",
-            "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-        },
     }
     output_type = "string"
 
-    def forward(self, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self) -> str:
         """Execute the page_down tool."""
         import asyncio
         controller = get_browser_controller()
@@ -952,16 +850,10 @@ class ClickFullTool(Tool):
             "description": "Mouse button to use ('left' or 'right'). Default: 'left'.",
             "nullable": True,
         },
-        "explanation": {
-            "type": "string",
-            "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-        },
     }
     output_type = "string"
 
-    def forward(self, target_id: int, hold: float = 0.0, button: str = "left", 
-                explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self, target_id: int, hold: float = 0.0, button: str = "left") -> str:
         """Execute the click_full tool."""
         import asyncio
         controller = get_browser_controller()
@@ -1006,15 +898,10 @@ class ScrollElementDownTool(Tool):
             "type": "integer",
             "description": "The numeric id of the target to scroll down.",
         },
-        "explanation": {
-            "type": "string",
-            "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-        },
     }
     output_type = "string"
 
-    def forward(self, target_id: int, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self, target_id: int) -> str:
         """Execute the scroll_element_down tool."""
         import asyncio
         controller = get_browser_controller()
@@ -1050,15 +937,10 @@ class ScrollElementUpTool(Tool):
             "type": "integer",
             "description": "The numeric id of the target to scroll UP.",
         },
-        "explanation": {
-            "type": "string",
-            "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-        },
     }
     output_type = "string"
 
-    def forward(self, target_id: int, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self, target_id: int) -> str:
         """Execute the scroll_element_up tool."""
         import asyncio
         controller = get_browser_controller()
@@ -1090,15 +972,10 @@ class SummarizePageTool(Tool):
     name = "summarize_page"
     description = "Uses AI to summarize the entire page."
     inputs = {
-        "explanation": {
-            "type": "string",
-            "description": EXPLANATION_TOOL_PROMPT,
-            "nullable": True,
-        },
     }
     output_type = "string"
 
-    def forward(self, explanation: str = DEFAULT_EXPLANATION) -> str:
+    def forward(self) -> str:
         """Execute the summarize_page tool."""
         import asyncio
         controller = get_browser_controller()

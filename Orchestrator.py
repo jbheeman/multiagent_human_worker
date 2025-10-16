@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
-
+from dotenv import load_dotenv
+load_dotenv()
 import json
 from smolagents import (
     ToolCallingAgent,
@@ -31,7 +32,7 @@ def main():
     model = OpenAIServerModel(
         model_id="gemma3",
         api_base="https://ellm.nrp-nautilus.io/v1",
-        api_key=os.environ.get("NAUT_API_KEY", "your_default_api_key"),
+        api_key=os.getenv("NAUT_API_KEY"),
     )
 
 
@@ -63,7 +64,7 @@ def main():
 
 
     manager_agent = ToolCallingAgent(
-        tools=[web_surfer_tool, file_surfer_tool, coder_tool, llm_tool, WebSearchTool(), *human_tools],
+        tools=[web_surfer_tool, file_surfer_tool, coder_tool, llm_tool, WebSearchTool()],
         model=model,
     )
 # Create simulated human tools for human-in-the-loop decisions
@@ -73,7 +74,10 @@ def main():
 
     # 4. Get the user's high-level goal
     user_goal = (
-        "Perform a detailed analysis of web_surfer_agent.py"
+
+        """
+        A paper about AI regulation that was originally submitted to arXiv.org in June 2022 shows a figure with three axes, where each axis has a label word at both ends. Which of these words is used to describe a type of society in a Physics and Society article submitted to arXiv.org on August 11, 2016?
+        """
     )
     print(f"\n🎯 User Goal: {user_goal}")
 
@@ -123,3 +127,6 @@ The result should be a clear, self-contained piece of information that can be ad
 if __name__ == "__main__":
     main()
 
+
+
+# "Annotator Metadata": {"Steps": "1. Go to arxiv.org and navigate to the Advanced Search page.\n2. Enter \"AI regulation\" in the search box and select \"All fields\" from the dropdown.\n3. Enter 2022-06-01 and 2022-07-01 into the date inputs, select \"Submission date (original)\", and submit the search.\n4. Go through the search results to find the article that has a figure with three axes and labels on each end of the axes, titled \"Fairness in Agreement With European Values: An Interdisciplinary Perspective on AI Regulation\".\n5. Note the six words used as labels: deontological, egalitarian, localized, standardized, utilitarian, and consequential.\n6. Go back to arxiv.org\n7. Find \"Physics and Society\" and go to the page for the \"Physics and Society\" category.\n8. Note that the tag for this category is \"physics.soc-ph\".\n9. Go to the Advanced Search page.\n10. Enter \"physics.soc-ph\" in the search box and select \"All fields\" from the dropdown.\n11. Enter 2016-08-11 and 2016-08-12 into the date inputs, select \"Submission date (original)\", and submit the search.\n12. Search for instances of the six words in the results to find the paper titled \"Phase transition from egalitarian to hierarchical societies driven by competition between cognitive and social constraints\", indicating that \"egalitarian\" is the correct answer."

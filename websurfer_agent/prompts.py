@@ -9,32 +9,6 @@ NEVER use arbitrary numbers - always use the exact numbers shown in the red boxe
 
 You will also be given a request that you need to complete that you need to infer from previous messages
 
-You have access to the following tools:
-- stop_action: Perform no action and provide an answer with a summary of past actions and observations
-- answer_question: Used to answer questions about the current webpage's content
-- summarize_page: Uses AI to summarize the entire page
-- click: Click on a target element using its ID
-- click_full: Click on a target element with optional hold duration and button type
-- hover: Hover the mouse over a target element using its ID
-- input_text: Type text into an input field, with options to delete existing text and press enter
-- select_option: Select an option from a dropdown/select menu
-- scroll_up: Scroll the viewport up towards the beginning
-- scroll_down: Scroll the viewport down towards the end
-- page_up: Scroll the entire browser viewport one page UP towards the beginning
-- page_down: Scroll the entire browser viewport one page DOWN towards the end
-- scroll_element_up: Scrolls a given html element (e.g., a div or a menu) UP
-- scroll_element_down: Scrolls a given html element (e.g., a div or a menu) DOWN
-- visit_url: Navigate directly to a provided URL
-- web_search: Perform a web search query on a search engine
-- history_back: Go back one page in browser history
-- refresh_page: Refresh the current page
-- keypress: Press one or more keyboard keys in sequence
-- sleep: Wait briefly for page loading or to improve task success
-- create_tab: Create a new tab and optionally navigate to a provided URL
-- switch_tab: Switch to a specific tab by its index
-- close_tab: Close a specific tab by its index
-- upload_file: Upload a file to the target input element
-
 When deciding between tools, follow these guidelines:
 
     1) if the request is completed, or you are unsure what to do, use the stop_action tool to respond to the request and include complete information
@@ -156,7 +130,7 @@ The JSON object should have the three components:
 
 1. "tool_name": the name of the tool to use
 2. "tool_args": a dictionary of arguments to pass to the tool
-3. "explanation": Explain to the user the action to be performed and reason for doing so. Phrase as if you are directly talking to the user
+3. "explanation": Brief explanation of the action (optional)
 
 {{
 "tool_name": "tool_name",
@@ -182,7 +156,7 @@ def WEB_SURFER_QA_PROMPT(title: str, question: str | None = None) -> str:
         return f"{base_prompt} Please summarize the webpage into one or two paragraphs:\n\n"
 
 
-EXPLANATION_TOOL_PROMPT = "Explain to the user the action to be performed and reason for doing so. Phrase as if you are directly talking to the user."
+# Removed EXPLANATION_TOOL_PROMPT - was pure token burn
 
 REFINED_GOAL_PROMPT = "1) Summarize all the information observed and actions performed so far and 2) refine the request to be completed"
 
@@ -198,15 +172,15 @@ Date: {date_today}
 CRITICAL: Use ONLY the numbered markers (red boxes) visible in screenshots to interact with elements.
 Example: If you see "14" in a red box around an input field, use input_text(input_field_id=14, ...)
 
-Available tools:
-- visit_url: Navigate to a URL
-- click: Click element by ID  
-- input_text: Type text into input field by ID
-- web_search: Search the web
-- answer_question: Answer questions about page content
-- stop_action: Provide final answer
-- scroll_up/scroll_down: Scroll page
-- sleep: Wait for loading
+    Available tools:
+    - visit_url: Navigate to a URL
+    - click: Click element by ID  
+    - input_text: Type text into input field by ID
+    - web_search: Search the web
+    - answer_question: Answer questions about page content
+    - stop_action: Provide final answer
+    - scroll_up/scroll_down: Scroll page
+    - sleep: Wait for loading
 
 Guidelines:
 1. Use exact numbered markers from screenshots

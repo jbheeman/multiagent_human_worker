@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from browser_playwright import PlaywrightController
 from browser_playwright.browser import LocalPlaywrightBrowser
 from .tool_definitions import ALL_TOOLS, set_browser_controller, set_id_mapping
-from .prompts import SIMPLE_WEB_SURFER_SYSTEM_MESSAGE
+from .prompts import SIMPLE_WEB_SURFER_SYSTEM_MESSAGE, WEB_SURFER_SYSTEM_MESSAGE
 from .set_of_mark import add_set_of_mark
 
 
@@ -146,6 +146,10 @@ class WebSurferAgent:
         self._last_rejected_url = None
         self._chat_history: List[Dict[str, Any]] = []
         self.model_usage: List[Dict[str, Any]] = []
+        
+        # Element tracking for compact details
+        self._previous_marker_ids: List[int] = []
+        self._codebook_sent = False
 
         # Create smol agents CodeAgent
         self._create_agent()
@@ -176,6 +180,11 @@ class WebSurferAgent:
     def _screenshot_callback(self, memory_step, agent):
         """Callback to capture annotated screenshots after each step."""
         import asyncio
+        from smolagents.memory import ActionStep
+        from .element_compactor import (
+            ELEMENT_CODEBOOK, build_compact_ed, diff_ids, format_element_details,
+            MarkerElement
+        )
         
         # Get the current event loop or create one
         try:
@@ -186,7 +195,7 @@ class WebSurferAgent:
         
         # Get annotated screenshot
         try:
-            annotated_img, visible_ids, ids_above, ids_below, id_mapping = loop.run_until_complete(
+            annotated_img, visible_ids, ids_above, ids_below, id_mapping, interactive_regions = loop.run_until_complete(
                 self._get_annotated_screenshot()
             )
             
@@ -195,42 +204,76 @@ class WebSurferAgent:
             # Also set it globally so tools can access it
             set_id_mapping(id_mapping)
             
-            # ID mapping updated in screenshot callback
-            
             # Resize for optimal tokens (matches magentic-ui sizing)
             resized_img = annotated_img.resize((self.MLM_WIDTH, self.MLM_HEIGHT))
 
-            # Persist the screenshot for debugging/inspection
-            try:
-                import os
-                from datetime import datetime
-                save_dir = os.path.join(os.getcwd(), "websurfer_agent", "screenshots")
-                os.makedirs(save_dir, exist_ok=True)
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                # Save both original annotated and model-sized images
-                annotated_path = os.path.join(save_dir, f"annotated_{ts}.png")
-                resized_path = os.path.join(save_dir, f"mlm_{ts}.png")
-                annotated_img.save(annotated_path)
-                resized_img.save(resized_path)
-            except Exception as save_err:
-                self.logger.debug(f"Failed to save screenshots: {save_err}")
-
+            # CRITICAL: Clean up old screenshots to prevent context bloat
+            # Keep only the current and previous step screenshots
+            latest_step = memory_step.step_number
+            for previous_memory_step in agent.memory.steps:
+                if isinstance(previous_memory_step, ActionStep) and previous_memory_step.step_number <= latest_step - 2:
+                    # Remove old screenshots to save tokens
+                    previous_memory_step.observations_images = None
             
-            # Attach to memory step for VLM to see
+            # Attach current screenshot to memory step for VLM to see
             memory_step.observations_images = [resized_img.copy()]
             
-            # Add marker information to observations text
-            marker_info = f"""
-[Screenshot with numbered markers attached]
-Interactive elements on current page:
-- Visible elements with markers: {', '.join(visible_ids) if visible_ids else 'none visible'}
-- Elements above viewport (scroll up to see): {', '.join(ids_above) if ids_above else 'none'}
-- Elements below viewport (scroll down to see): {', '.join(ids_below) if ids_below else 'none'}
-
-IMPORTANT: Use ONLY the numbered markers visible in the screenshot to interact with elements.
-Example: To click the element with red box and number "5", use click(target_id=5)
-The page content text is for context only - always use the visual markers for interaction.
-"""
+            # Build compact element details from actual Playwright data
+            elements = []
+            for element_id in visible_ids:
+                # Get the real element details from the interactive regions
+                real_id = id_mapping.get(element_id, element_id)
+                
+                # Extract real element details from interactive_regions
+                if real_id in interactive_regions:
+                    region = interactive_regions[real_id]
+                    # Extract element details from the region
+                    tag = getattr(region, 'tag_name', 'div')
+                    role = getattr(region, 'role', 'text')
+                    text = getattr(region, 'aria_name', '') or ''
+                    
+                    elements.append(MarkerElement(
+                        id=int(element_id),
+                        tag=tag,
+                        role=role,
+                        text=text,
+                        visible=True,
+                        interactive=True,
+                        in_form=False,  # Could be enhanced
+                        focused=False,  # Could be enhanced
+                        cta=any(word in text.lower() for word in ['submit', 'login', 'search', 'click'])
+                    ))
+                else:
+                    # Fallback for elements not in interactive_regions
+                    elements.append(MarkerElement(
+                        id=int(element_id),
+                        tag="button",
+                        role="button",  
+                        text="",
+                        visible=True,
+                        interactive=True
+                    ))
+            
+            # Calculate delta from previous step
+            current_ids = [int(id) for id in visible_ids]
+            delta = diff_ids(self._previous_marker_ids, current_ids)
+            self._previous_marker_ids = current_ids
+            
+            # Build compact element details
+            ed_data = build_compact_ed(elements, k=12)  # Top 12 most salient elements
+            
+            # Format marker information with compact details
+            marker_info = format_element_details(ed_data, delta)
+            
+            # Debug: Log the compact element details
+            self.logger.info(f"Compact element details: {ed_data}")
+            self.logger.info(f"Formatted marker info: {marker_info[:200]}...")
+            
+            # Add codebook once at the start
+            if not self._codebook_sent:
+                codebook_info = f"ELEMENT CODEBOOK: {ELEMENT_CODEBOOK}\n\n"
+                marker_info = codebook_info + marker_info
+                self._codebook_sent = True
             
             # Add to observations
             if memory_step.observations:
@@ -297,7 +340,7 @@ The page content text is for context only - always use the visual markers for in
 
     async def _get_annotated_screenshot(
         self
-    ) -> Tuple[PIL.Image.Image, List[str], List[str], List[str], Dict[str, str]]:
+    ) -> Tuple[PIL.Image.Image, List[str], List[str], List[str], Dict[str, str], Dict[str, Any]]:
         """
         Get an annotated screenshot with numbered markers for interactive elements.
         
@@ -308,12 +351,13 @@ The page content text is for context only - always use the visual markers for in
             - List[str]: IDs of elements above viewport (scroll up to see)
             - List[str]: IDs of elements below viewport (scroll down to see)
             - Dict[str, str]: Mapping from display IDs to real element IDs
+            - Dict[str, Any]: Interactive regions data for element details
         """
         page = self._playwright_controller._page
         if not page:
             # Return empty/default values if no page
             blank_img = PIL.Image.new('RGB', (self.MLM_WIDTH, self.MLM_HEIGHT), color='white')
-            return blank_img, [], [], [], {}
+            return blank_img, [], [], [], {}, {}
         
         # 1. Get interactive elements from the page
         interactive_regions = await self._playwright_controller.get_interactive_rects(page)
@@ -335,7 +379,7 @@ The page content text is for context only - always use the visual markers for in
             annotated_image.save(debug_path)
             self.logger.debug(f"Saved annotated screenshot to {debug_path}")
         
-        return annotated_image, visible_ids, ids_above, ids_below, id_mapping
+        return annotated_image, visible_ids, ids_above, ids_below, id_mapping, interactive_regions
 
     async def run(self, request: str) -> str:
         """Run the WebSurfer agent with a given request."""
@@ -362,7 +406,7 @@ The page content text is for context only - always use the visual markers for in
             # Build enhanced context with system prompt and current state
             # Similar to how FileSurfer does it
             date_today = datetime.now().strftime("%B %d, %Y")
-            system_prompt = SIMPLE_WEB_SURFER_SYSTEM_MESSAGE.format(date_today=date_today)
+            system_prompt = WEB_SURFER_SYSTEM_MESSAGE.format(date_today=date_today)
             
             initial_context = (
                 f"{system_prompt}\n\n"
@@ -471,6 +515,16 @@ The page content text is for context only - always use the visual markers for in
     def clear_chat_history(self) -> None:
         """Clear the chat history."""
         self._chat_history.clear()
+    
+    def clear_agent_memory(self) -> None:
+        """Clear the underlying CodeAgent's memory to prevent context bloat."""
+        if hasattr(self.agent, 'memory') and hasattr(self.agent.memory, 'steps'):
+            # Clear all memory steps except the last one to maintain some context
+            if len(self.agent.memory.steps) > 1:
+                # Keep only the most recent step
+                latest_step = self.agent.memory.steps[-1]
+                self.agent.memory.steps = [latest_step]
+                self.logger.info("Cleared old agent memory to prevent context bloat")
 
     # Context manager support
     async def __aenter__(self):
