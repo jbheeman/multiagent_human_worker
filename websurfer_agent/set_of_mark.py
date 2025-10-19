@@ -3,14 +3,22 @@ from typing import BinaryIO, Dict, List, Tuple, cast
 
 from PIL import Image, ImageDraw, ImageFont
 
-# Mock InteractiveRegion class
-class InteractiveRegion:
-    def __init__(self, **kwargs):
-        self.rects = kwargs.get('rects', [])
-        self.role = kwargs.get('role', '')
-        self.aria_name = kwargs.get('aria_name', '')
-        self.tag_name = kwargs.get('tag_name', '')
-        self.contenteditable = kwargs.get('contenteditable', 'false')
+# Import the actual InteractiveRegion type from browser_playwright
+try:
+    from browser_playwright.types import InteractiveRegion
+except ImportError:
+    # Fallback for when browser_playwright is not available
+    from typing import TypedDict
+    class InteractiveRegion(TypedDict):
+        tag_name: str
+        role: str
+        aria_name: str
+        v_scrollable: bool
+        href: str
+        text: str
+        value: str
+        tag: str
+        rects: List[Dict[str, float]]
 
 # Mock DOMRectangle
 class DOMRectangle:
@@ -199,14 +207,31 @@ def _draw_roi(
     text_color = (255, 255, 255, 255)  # White text for better contrast
 
     roi = ((rect["left"], rect["top"]), (rect["right"], rect["bottom"]))
-
-    # Adjust label position if too close to top of screen
-    label_location = (rect["right"], rect["top"])
-    label_anchor = "rb"
-
-    if label_location[1] <= TOP_NO_LABEL_ZONE:
-        label_location = (rect["right"], rect["bottom"])
-        label_anchor = "rt"
+    
+    # Calculate element dimensions
+    width = rect["right"] - rect["left"]
+    height = rect["bottom"] - rect["top"]
+    center_x = (rect["left"] + rect["right"]) / 2.0
+    center_y = (rect["top"] + rect["bottom"]) / 2.0
+    
+    # Determine label position based on element size
+    MIN_SIZE_FOR_CENTER = 40  # Minimum width to place label in center (lowered from 60)
+    MIN_HEIGHT_FOR_CENTER = 20  # Minimum height to place label in center (lowered from 30)
+    
+    if width >= MIN_SIZE_FOR_CENTER and height >= MIN_HEIGHT_FOR_CENTER:
+        # Large enough element - place label in center
+        label_location = (center_x, center_y)
+        label_anchor = "mm"  # middle-middle
+    else:
+        # Small element - use smart corner positioning
+        if rect["top"] <= TOP_NO_LABEL_ZONE:
+            # Too close to top - place at bottom-right
+            label_location = (rect["right"], rect["bottom"])
+            label_anchor = "rt"
+        else:
+            # Normal case - place at top-right
+            label_location = (rect["right"], rect["top"])
+            label_anchor = "rb"
 
     draw.rectangle(roi, outline=color, width=2)
 

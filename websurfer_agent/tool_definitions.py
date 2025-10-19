@@ -8,11 +8,14 @@ nest_asyncio.apply()
 
 if TYPE_CHECKING:
     from browser_playwright import PlaywrightController
+    from smolagents.models import OpenAIServerModel
 
 # Removed explanation fields - they were pure token burn
 
 # Global browser controller instance that will be set by WebSurferAgent
 _browser_controller: Optional['PlaywrightController'] = None
+# Global model instance for LLM operations
+_model: Optional['OpenAIServerModel'] = None
 # Global ID mapping for Set of Mark (maps display IDs like "5" to real element IDs)
 _id_mapping: Dict[str, str] = {}
 
@@ -24,6 +27,15 @@ def set_browser_controller(controller: 'PlaywrightController'):
 def get_browser_controller() -> Optional['PlaywrightController']:
     """Get the global browser controller."""
     return _browser_controller
+
+def set_model(model: 'OpenAIServerModel'):
+    """Set the global model for LLM operations."""
+    global _model
+    _model = model
+
+def get_model() -> Optional['OpenAIServerModel']:
+    """Get the global model."""
+    return _model
 
 def set_id_mapping(mapping: Dict[str, str]):
     """Set the ID mapping for Set of Mark."""
@@ -43,6 +55,51 @@ def get_real_element_id(display_id: str) -> str:
     """
     global _id_mapping
     return _id_mapping.get(display_id, display_id)
+
+def validate_element_type(page, real_id: str, expected_type: str) -> tuple[bool, str]:
+    """
+    Validate that an element is of the expected type.
+    
+    Args:
+        page: Playwright page object
+        real_id: Real element ID
+        expected_type: Expected element type ("input", "button", "link", etc.)
+    
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    import asyncio
+    
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    try:
+        selector = f"[__elementId='{real_id}']"
+        element = page.locator(selector)
+        
+        # Get element tag name
+        tag_name = loop.run_until_complete(element.evaluate("el => el.tagName.toLowerCase()"))
+        
+        # Get element type if it's an input
+        element_type = ""
+        if tag_name == "input":
+            element_type = loop.run_until_complete(element.evaluate("el => el.type"))
+        
+        # Validate based on expected type
+        if expected_type == "input" and tag_name != "input":
+            return False, f"Element is {tag_name}, not an input field"
+        elif expected_type == "button" and tag_name not in ["button", "input"]:
+            return False, f"Element is {tag_name}, not a button"
+        elif expected_type == "clickable" and tag_name not in ["button", "a", "input"]:
+            return False, f"Element is {tag_name}, not clickable"
+        
+        return True, ""
+        
+    except Exception as e:
+        return False, f"Error validating element type: {str(e)}"
 
 # Tool definitions for WebSurfer agent
 class VisitUrlTool(Tool):
@@ -290,8 +347,30 @@ class ClickTool(Tool):
             if page is None:
                 return "Error: No page available."
             
+            # Check if page is still connected
+            if page.is_closed():
+                return "Error: Page has been closed."
+            
             # Map display ID to real element ID (for Set of Mark support)
             real_id = get_real_element_id(str(target_id))
+            
+            # Validate that the element exists and is clickable
+            try:
+                selector = f"[__elementId='{real_id}']"
+                # Quick check if element exists - properly await the coroutine
+                element_count = loop.run_until_complete(
+                    page.locator(selector).count()
+                )
+                if element_count == 0:
+                    return f"Error: Element {target_id} (real_id: {real_id}) not found on page."
+                
+                # Validate element type
+                is_valid, error_msg = validate_element_type(page, real_id, "clickable")
+                if not is_valid:
+                    return f"Error: {error_msg} for element {target_id}"
+                    
+            except Exception as e:
+                return f"Error validating element {target_id}: {str(e)}"
             
             # Click the element
             loop.run_until_complete(controller.click_id(context, page, real_id))
@@ -358,8 +437,30 @@ class InputTextTool(Tool):
             if page is None:
                 return "Error: No page available."
             
+            # Check if page is still connected
+            if page.is_closed():
+                return "Error: Page has been closed."
+            
             # Map display ID to real element ID (for Set of Mark support)
             real_id = get_real_element_id(str(input_field_id))
+            
+            # Validate that the input field exists and is the right type
+            try:
+                selector = f"[__elementId='{real_id}']"
+                # Quick check if element exists - properly await the coroutine
+                element_count = loop.run_until_complete(
+                    page.locator(selector).count()
+                )
+                if element_count == 0:
+                    return f"Error: Input field {input_field_id} (real_id: {real_id}) not found on page."
+                
+                # Validate element type
+                is_valid, error_msg = validate_element_type(page, real_id, "input")
+                if not is_valid:
+                    return f"Error: {error_msg} for element {input_field_id}"
+                    
+            except Exception as e:
+                return f"Error validating input field {input_field_id}: {str(e)}"
             
             loop.run_until_complete(controller.fill_id(
                 page, real_id, text_value, 
@@ -461,8 +562,13 @@ class ReadPageAndAnswerTool(Tool):
         """Execute the answer_question tool."""
         import asyncio
         controller = get_browser_controller()
+        model = get_model()
+        
         if controller is None:
             return "Error: Browser controller not initialized."
+        
+        if model is None:
+            return "Error: Model not initialized."
         
         try:
             loop = asyncio.get_event_loop()
@@ -479,29 +585,38 @@ class ReadPageAndAnswerTool(Tool):
             content = loop.run_until_complete(controller.get_page_markdown(page, max_tokens=8000))
             
             # Use LLM to answer the question based on page content
-            # For now, we'll extract relevant information using simple text search
-            # A full implementation would use the model to analyze and answer
+            if not content.strip():
+                return "The page appears to be empty or the content could not be extracted."
             
-            # Simple extraction: look for stock-related content
-            lines = content.lower().split('\n')
-            relevant_info = []
+            # For questions about element types or visual elements, provide helpful guidance
+            if any(keyword in question.lower() for keyword in ['element', 'type', 'clickable', 'input', 'button', 'dropdown', 'select']):
+                return f"""I cannot determine specific element types or visual information from the text content alone. 
+
+For questions about interactive elements (buttons, inputs, dropdowns, etc.), you should:
+1. Look at the annotated screenshot provided in your context
+2. Use the numbered markers (red boxes) visible in the screenshot to identify elements
+3. The screenshot shows interactive elements with numbered IDs that you can use with click, input_text, or other interaction tools
+
+The text content I can see is: {content[:500]}...
+
+If you need to understand what type of element a specific number refers to, look at the screenshot and the numbered markers around interactive elements."""
+
+            # Construct a prompt for the LLM
+            prompt = f"""Based on the following webpage content, please answer the question: "{question}"
+
+Webpage content:
+{content}
+
+Please provide a clear, concise answer based on the information available on the page. If the information is not available or unclear, please state that explicitly."""
+
+            # Use the model to generate an answer
+            messages = [{"role": "user", "content": prompt}]
+            response = model(messages)
             
-            # Keywords to look for
-            keywords = ['stock', 'buy', 'recommend', 'portfolio', 'ticker', 'company']
-            
-            for line in lines:
-                if any(keyword in line for keyword in keywords):
-                    relevant_info.append(line)
-            
-            if relevant_info:
-                answer = "Based on the page content, here's what I found:\n\n" + '\n'.join(relevant_info[:20])  # Limit to avoid token overflow
-            else:
-                answer = f"I couldn't find specific information to answer '{question}' on this page. The page contains general content but no clear stock recommendations."
-            
-            return answer
+            return response.content
             
         except Exception as e:
-            return f"Error reading page: {str(e)}"
+            return f"Error reading page or generating answer: {str(e)}"
 
 
 class SleepTool(Tool):
@@ -538,7 +653,8 @@ class StopActionTool(Tool):
 
     def forward(self, answer: str) -> str:
         """Execute the stop_action tool."""
-        return answer
+        # Return a special marker that indicates task completion
+        return f"TASK_COMPLETED: {answer}"
 
 
 class SelectOptionTool(Tool):

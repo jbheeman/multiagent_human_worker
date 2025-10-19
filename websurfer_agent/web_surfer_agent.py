@@ -24,7 +24,7 @@ from urllib.parse import quote_plus
 import PIL.Image
 import tiktoken
 
-from smolagents import Tool, CodeAgent, WebSearchTool as SmolagentsWebSearchTool
+from smolagents import Tool, CodeAgent, ToolCallingAgent, WebSearchTool as SmolagentsWebSearchTool
 from smolagents.models import OpenAIServerModel
 
 from .config import WebSurferConfig
@@ -34,7 +34,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from browser_playwright import PlaywrightController
 from browser_playwright.browser import LocalPlaywrightBrowser
-from .tool_definitions import ALL_TOOLS, set_browser_controller, set_id_mapping
+from .tool_definitions import ALL_TOOLS, set_browser_controller, set_id_mapping, set_model
 from .prompts import SIMPLE_WEB_SURFER_SYSTEM_MESSAGE, WEB_SURFER_SYSTEM_MESSAGE
 from .set_of_mark import add_set_of_mark
 
@@ -83,7 +83,7 @@ class WebSurferAgent:
         start_page: str = DEFAULT_START_PAGE,
         animate_actions: bool = False,
         to_save_screenshots: bool = False,
-        max_actions_per_step: int = 5,
+        max_actions_per_step: int = 10,
         to_resize_viewport: bool = True,
         url_statuses: Optional[Dict[str, str]] = None,
         url_block_list: Optional[List[str]] = None,
@@ -193,8 +193,13 @@ class WebSurferAgent:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         
-        # Get annotated screenshot
+        # Get annotated screenshot with proper error handling
         try:
+            # Check if browser/page is still available before attempting screenshot
+            if not self._playwright_controller or not self._playwright_controller._page:
+                self.logger.warning("Browser/page not available for screenshot callback")
+                return
+                
             annotated_img, visible_ids, ids_above, ids_below, id_mapping, interactive_regions = loop.run_until_complete(
                 self._get_annotated_screenshot()
             )
@@ -260,7 +265,7 @@ class WebSurferAgent:
             self._previous_marker_ids = current_ids
             
             # Build compact element details
-            ed_data = build_compact_ed(elements, k=12)  # Top 12 most salient elements
+            ed_data = build_compact_ed(elements, k=20)  # Top 20 most salient elements
             
             # Format marker information with compact details
             marker_info = format_element_details(ed_data, delta)
@@ -289,12 +294,13 @@ class WebSurferAgent:
         if not self.model:
             raise ValueError("Model is required to create WebSurfer agent")
         
-        # Set the browser controller for all tools to use
+        # Set the browser controller and model for all tools to use
         set_browser_controller(self._playwright_controller)
+        set_model(self.model)
         
         # Create the agent with vision support via step callbacks
         # The callback will capture annotated screenshots after each action
-        self.agent = CodeAgent(
+        self.agent = ToolCallingAgent(
             tools=ALL_TOOLS,
             model=self.model,
             step_callbacks=[self._screenshot_callback],  # Enable vision!
@@ -359,18 +365,30 @@ class WebSurferAgent:
             blank_img = PIL.Image.new('RGB', (self.MLM_WIDTH, self.MLM_HEIGHT), color='white')
             return blank_img, [], [], [], {}, {}
         
-        # 1. Get interactive elements from the page
-        interactive_regions = await self._playwright_controller.get_interactive_rects(page)
-        
-        # 2. Take screenshot
-        screenshot_bytes = await self._playwright_controller.get_screenshot(page)
-        
-        # 3. Annotate with numbered markers
-        annotated_image, visible_ids, ids_above, ids_below, id_mapping = add_set_of_mark(
-            screenshot=screenshot_bytes,
-            ROIs=interactive_regions,
-            use_sequential_ids=True  # Use 1, 2, 3... instead of element IDs
-        )
+        try:
+            # Check if page is still connected
+            if page.is_closed():
+                self.logger.warning("Page is closed, returning blank screenshot")
+                blank_img = PIL.Image.new('RGB', (self.MLM_WIDTH, self.MLM_HEIGHT), color='white')
+                return blank_img, [], [], [], {}, {}
+            
+            # 1. Get interactive elements from the page
+            interactive_regions = await self._playwright_controller.get_interactive_rects(page)
+            
+            # 2. Take screenshot
+            screenshot_bytes = await self._playwright_controller.get_screenshot(page)
+            
+            # 3. Annotate with numbered markers
+            annotated_image, visible_ids, ids_above, ids_below, id_mapping = add_set_of_mark(
+                screenshot=screenshot_bytes,
+                ROIs=interactive_regions,
+                use_sequential_ids=True  # Use 1, 2, 3... instead of element IDs
+            )
+        except Exception as e:
+            self.logger.error(f"Error getting annotated screenshot: {e}")
+            # Return blank screenshot on error
+            blank_img = PIL.Image.new('RGB', (self.MLM_WIDTH, self.MLM_HEIGHT), color='white')
+            return blank_img, [], [], [], {}, {}
         
         # 4. Save debug screenshot if enabled
         if self.to_save_screenshots and self.debug_dir:
@@ -378,6 +396,17 @@ class WebSurferAgent:
             debug_path = os.path.join(self.debug_dir, f"screenshot_annotated_{timestamp}.png")
             annotated_image.save(debug_path)
             self.logger.debug(f"Saved annotated screenshot to {debug_path}")
+        
+        # Always save screenshots to the screenshots directory for debugging
+        screenshots_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "screenshots")
+        if not os.path.exists(screenshots_dir):
+            os.makedirs(screenshots_dir, exist_ok=True)
+        
+        timestamp = int(time.time() * 1000)  # Use milliseconds for uniqueness
+        screenshot_path = os.path.join(screenshots_dir, f"llm_screenshot_{timestamp}.png")
+        annotated_image.save(screenshot_path)
+        print(f"📸 Saved LLM screenshot: {screenshot_path}")
+        self.logger.info(f"Saved LLM screenshot to {screenshot_path}")
         
         return annotated_image, visible_ids, ids_above, ids_below, id_mapping, interactive_regions
 
@@ -417,8 +446,43 @@ class WebSurferAgent:
                 f"Begin your work. Use the available tools to complete the task.\n"
             )
             
+            # Run the agent step by step to check for task completion
             result = self.agent.run(initial_context)
             
+            # Check if any step contains a task completion marker
+            for step in self.agent.memory.steps:
+                if hasattr(step, 'tool_calls') and step.tool_calls:
+                    for tool_call in step.tool_calls:
+                        if tool_call.name == 'stop_action':
+                            # Check if the result contains our completion marker
+                            if hasattr(tool_call, 'result') and isinstance(tool_call.result, str) and tool_call.result.startswith("TASK_COMPLETED:"):
+                                # Extract the actual answer
+                                answer = tool_call.result.replace("TASK_COMPLETED:", "").strip()
+                                self.logger.info(f"Task completed via stop_action: {answer}")
+                                
+                                # Add to chat history
+                                self._chat_history.append({
+                                    "role": "assistant", 
+                                    "content": answer
+                                })
+                                
+                                return answer
+                            # Also check the raw result string
+                            elif hasattr(tool_call, 'result') and isinstance(tool_call.result, str) and "TASK_COMPLETED:" in tool_call.result:
+                                # Extract the actual answer
+                                answer = tool_call.result.replace("TASK_COMPLETED:", "").strip()
+                                self.logger.info(f"Task completed via stop_action (fallback): {answer}")
+                                
+                                # Add to chat history
+                                self._chat_history.append({
+                                    "role": "assistant", 
+                                    "content": answer
+                                })
+                                
+                                return answer
+            
+
+
             # Add to chat history
             self._chat_history.append({
                 "role": "assistant", 

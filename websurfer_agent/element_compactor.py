@@ -24,7 +24,9 @@ ROLE_CODE = ELEMENT_CODEBOOK["codes"]["role"]
 ACTION_WORDS = {
     "login", "sign in", "search", "submit", "next", "continue", "apply", 
     "advanced", "filter", "checkout", "add to cart", "buy", "click", 
-    "download", "upload", "save", "cancel", "confirm", "select", "choose"
+    "download", "upload", "save", "cancel", "confirm", "select", "choose",
+    "go", "enter", "find", "browse", "navigate", "access", "open", "view",
+    "show", "hide", "expand", "collapse", "more", "less", "all", "none"
 }
 
 def norm_text(s: str, maxlen: int = 24) -> str:
@@ -61,6 +63,13 @@ def salience_score(el: Dict[str, Any]) -> int:
     text = norm_text(el.get("text", "") or el.get("aria_label", ""))
     if any(word in text for word in ACTION_WORDS):
         score += 3
+    
+    # Special boost for search input fields
+    if tag == "input" and role == "textbox":
+        if "search" in text or text in ["", "search", "search..."]:
+            score += 10  # High priority for search fields
+        else:
+            score += 5   # Medium priority for other input fields
     
     # Boost for visible interactive elements
     if el.get("visible", True) and el.get("interactive", False):
@@ -136,7 +145,7 @@ def format_element_details(ed_data: Dict[str, Any], delta: Optional[Dict[str, Li
     if not ed:
         return "No interactive elements found."
     
-    lines = ["ELEMENT DETAILS (use numbered markers in screenshot):"]
+    lines = ["ELEMENTS (use numbered markers in screenshot):"]
     
     # Add delta info if provided
     if delta:
@@ -145,13 +154,34 @@ def format_element_details(ed_data: Dict[str, Any], delta: Optional[Dict[str, Li
         if delta["removed"]:
             lines.append(f"REMOVED: {delta['removed']}")
     
-    # Add compact element info
+    # Add compact element info with concise descriptions
     for item in ed:
         id_val, tag_code, role_code, text, hash_val = item
         tag_name = next((k for k, v in TAG_CODE.items() if v == tag_code), "?")
         role_name = next((k for k, v in ROLE_CODE.items() if v == role_code), "?")
         
-        text_display = text if text else "no text"
-        lines.append(f"- Marker {id_val}: {tag_name}/{role_name}, text: '{text_display}'")
+        text_display = text if text else ""
+        
+        # Add concise hints for important elements
+        hint = ""
+        if tag_name == "input" and role_name == "textbox":
+            if "search" in text_display.lower() or text_display.lower() in ["", "search", "search..."]:
+                hint = " 🔍SEARCH"
+            else:
+                hint = " INPUT"
+        elif tag_name == "button":
+            hint = " BTN"
+        elif tag_name == "select" and role_name == "combobox":
+            hint = " DROPDOWN"
+        elif tag_name == "a" and role_name == "link":
+            hint = " LINK"
+        elif tag_name == "textarea":
+            hint = " TEXTAREA"
+            
+        # Format: ID: type hint, text
+        if text_display:
+            lines.append(f"{id_val}: {tag_name}{hint}, '{text_display[:30]}'")
+        else:
+            lines.append(f"{id_val}: {tag_name}{hint}")
     
     return "\n".join(lines)
