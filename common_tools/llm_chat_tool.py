@@ -21,7 +21,7 @@ def create_llm_chat_tool(model: OpenAIServerModel, plan_state=Optional[PlanState
         """
         Use for general reasoning, summarization, or answering questions based on text.
         This tool is a direct interface to a powerful language model. It automatically
-        receives the results from prior steps.
+        receives the results from prior steps. It DOES NOT have access to the internet.
         
         Args:
             query (str): The specific question to ask or instruction to follow.
