@@ -24,7 +24,7 @@ from planning_agent.plan_state_manager import PlanStateManager
 
 
 #Expert agent
-from simulated_humans.simulated_human import ExpertAgent
+from simulated_humans.simulated_human import ExpertAgent, ask_human_expert_for_help, set_expert_agent
 def main():
     """
     The main orchestration logic.
@@ -76,10 +76,11 @@ def main():
     print(f"Side info: {side_info}")
     expert_agent = ExpertAgent(name="Expert", model=model, side_info=side_info)
 
-   
+    # Set the expert agent for the co-execution tool
+    set_expert_agent(expert_agent)
 
     manager_agent = ToolCallingAgent(
-        tools=[web_surfer_tool, file_surfer_tool, coder_tool, llm_tool, WebSearchTool()],
+        tools=[web_surfer_tool, file_surfer_tool, coder_tool, llm_tool, WebSearchTool(), ask_human_expert_for_help],
         model=model,
     )
 # Create simulated human tools for human-in-the-loop decisions
@@ -88,31 +89,41 @@ def main():
     # --- Start of the Workflow ---
 
     # 4. Get the user's high-level goal
-    user_goal = (
+    
+    user_goal = ( 
+
 
         """
-        A paper about AI regulation that was originally submitted to arXiv.org in June 2022 shows a figure with three axes, where each axis has a label word at both ends. Which of these words is used to describe a type of society in a Physics and Society article submitted to arXiv.org on August 11, 2016?
+
+        I'm researching species that became invasive after people who kept them as pets released them. There's a certain species of fish that was popularized as a pet by being the main character of the movie Finding Nemo. According to the USGS, where was this fish found as a nonnative species, before the year 2020? I need the answer formatted as the five-digit zip codes of the places the species was found, separated by commas if there is more than one place.
         """
     )
+    
+    
+    # user_goal = (
+
+    #     """
+    #     A paper about AI regulation that was originally submitted to arXiv.org in June 2022 shows a figure with three axes, where each axis has a label word at both ends. Which of these words is used to describe a type of society in a Physics and Society article submitted to arXiv.org on August 11, 2016?
+    #     """
+    # )
     print(f"\n🎯 User Goal: {user_goal}")
 
     # 5. Generate the plan
     plan = planner.run(user_goal)
 
-    plan_summary = llm_tool(query=f"Summarize the following plan in a concise manner: {plan}")
+    # plan_summary = llm_tool(query=f"Summarize the following plan in a concise manner: {plan}")
 
 
 
-    expert_review = expert_agent.review_plan(user_goal, plan, side_info)
+    simhuman_review = expert_agent.review_plan(user_goal, plan, side_info)
     
     #modify the plan based on the expert review, if there are edits, add them to the plan
-    print(f"\n🔍 Expert Review: {expert_review}")
+    print(f"\n🔍 Expert Review: {simhuman_review}")
 
-    print(f"\n🔍 Plan Summary: {plan_summary}")
 
     replanner_agent = PlanningAgent(model=model)
 
-    replan_plan = replanner_agent.refine(user_goal, plan_summary, expert_review)
+    replan_plan = replanner_agent.refine(user_goal, plan, simhuman_review)
 
     print(f"\n🔍 Re-planned Plan: {replan_plan}")
 
@@ -138,6 +149,8 @@ Your current, specific task is: "{current_task}"
 
 Analyze the state and the task, choose the best tool, execute it, and return the result of your action.
 The result should be a clear, self-contained piece of information that can be added to the project state.
+
+If you get stuck or need guidance on how to proceed with the current task, you can use the ask_human_expert_for_help tool to get assistance from a simulated human expert who has access to side information about this task.
 """
 
         result = manager_agent.run(prompt)

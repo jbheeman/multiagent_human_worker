@@ -1115,6 +1115,157 @@ class SummarizePageTool(Tool):
             return f"Error getting page content: {str(e)}"
 
 
+class DebugThoughtProcessTool(Tool):
+    """Debug tool to show your thought process when selecting elements."""
+    name = "debug_thought_process"
+    description = "Use this to show your reasoning when selecting an element. Explain why you chose a specific element ID and what you think it is."
+    inputs = {
+        "chosen_element_id": {
+            "type": "integer",
+            "description": "The element ID you are considering using.",
+        },
+        "intended_action": {
+            "type": "string", 
+            "description": "The action you want to perform (e.g., 'input_text', 'click', 'select_option').",
+        },
+        "reasoning": {
+            "type": "string",
+            "description": "Explain your reasoning: Why did you choose this element? What do you think it is? What makes you think it's the right choice?",
+        },
+        "goal_description": {
+            "type": "string",
+            "description": "What are you trying to accomplish?",
+        },
+    }
+    output_type = "string"
+
+    def forward(self, chosen_element_id: int, intended_action: str, reasoning: str, goal_description: str) -> str:
+        """Execute the debug thought process tool."""
+        global _id_mapping
+        
+        debug_output = f"""
+🧠 DEBUG THOUGHT PROCESS:
+
+Chosen Element ID: {chosen_element_id}
+Intended Action: {intended_action}
+Goal: {goal_description}
+
+Your Reasoning: {reasoning}
+
+Available Elements: {list(_id_mapping.keys()) if _id_mapping else "No mappings available"}
+
+ANALYSIS:
+- Element {chosen_element_id} {'exists' if str(chosen_element_id) in _id_mapping else 'does NOT exist'} in current mapping
+- You want to use {intended_action} on element {chosen_element_id}
+- This suggests you think element {chosen_element_id} is a {'input field' if intended_action == 'input_text' else 'clickable element' if intended_action == 'click' else 'select dropdown' if intended_action == 'select_option' else 'unknown type'}
+
+⚠️ CRITICAL CHECK: Before proceeding, make sure you've carefully examined the screenshot and element mapping!
+"""
+        
+        return debug_output
+
+class GetElementMappingsTool(Tool):
+    """Gets the current page element mappings to help identify interactive elements."""
+    name = "get_element_mappings"
+    description = "Gets the current page element mappings showing all numbered interactive elements and their types. Use this when you need to understand what elements are available on the current page."
+    inputs = {}
+    output_type = "string"
+
+    def forward(self) -> str:
+        """Execute the get_element_mappings tool."""
+        global _id_mapping
+        
+        if not _id_mapping:
+            return "No element mappings available. Element mappings are provided automatically with each screenshot. Look at the numbered markers (red boxes) in the screenshot to identify interactive elements."
+        
+        # For now, provide basic validation without async calls to avoid hanging
+        # This is a simplified version that focuses on the core validation logic
+        
+        checks = []
+        checks.append(f"✅ Element {target_id} exists in mapping")
+        
+        # Basic type validation based on common patterns
+        # This is a simplified check - the agent should still use get_element_mappings for detailed info
+        if intended_action == "input_text":
+            checks.append(f"⚠️ Using input_text on element {target_id}. Make sure this is actually an input field, not a link or button.")
+            checks.append(f"💡 If you get an error, element {target_id} is likely a link - use click instead.")
+        elif intended_action == "click":
+            checks.append(f"✅ Using click on element {target_id} - this should work for links, buttons, etc.")
+        elif intended_action == "select_option":
+            checks.append(f"⚠️ Using select_option on element {target_id}. Make sure this is actually a select dropdown.")
+        
+        # Overall assessment
+        result = "CRITIC: ⚠️ BASIC VALIDATION - Element exists in mapping. Proceed with caution and be ready to adjust if you get a type error."
+        
+        return f"{result}\n\nValidation Details:\n" + "\n".join(checks) + "\n\n💡 If you get a type error, use get_element_mappings to see the actual element types."
+
+
+class GetElementMappingsTool(Tool):
+    """Gets the current page element mappings to help identify interactive elements."""
+    name = "get_element_mappings"
+    description = "Gets the current page element mappings showing all numbered interactive elements and their types. Use this when you need to understand what elements are available on the current page."
+    inputs = {}
+    output_type = "string"
+
+    def forward(self) -> str:
+        """Execute the get_element_mappings tool."""
+        import asyncio
+        global _id_mapping
+        
+        if not _id_mapping:
+            return "No element mappings available. Element mappings are provided automatically with each screenshot. Look at the numbered markers (red boxes) in the screenshot to identify interactive elements."
+        
+        controller = get_browser_controller()
+        if controller is None:
+            return "Error: Browser controller not initialized."
+        
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        try:
+            page = controller._page
+            if page is None:
+                return "Error: No page available."
+            
+            # Format the mappings with detailed element information
+            mappings_text = "Current page element mappings:\n\n"
+            
+            for display_id, real_id in sorted(_id_mapping.items(), key=lambda x: int(x[0])):
+                try:
+                    selector = f"[__elementId='{real_id}']"
+                    element = page.locator(selector)
+                    
+                    # Get element tag name
+                    tag_name = loop.run_until_complete(element.evaluate("el => el.tagName.toLowerCase()"))
+                    
+                    # Get element type if it's an input
+                    element_type = ""
+                    if tag_name == "input":
+                        element_type = loop.run_until_complete(element.evaluate("el => el.type"))
+                        mappings_text += f"Element {display_id}: {tag_name}[type={element_type}]\n"
+                    else:
+                        mappings_text += f"Element {display_id}: {tag_name}\n"
+                        
+                except Exception as e:
+                    mappings_text += f"Element {display_id}: unknown (error: {str(e)})\n"
+            
+            mappings_text += "\nElement type guide:\n"
+            mappings_text += "- input[type=text]: Use with input_text tool\n"
+            mappings_text += "- input[type=search]: Use with input_text tool\n"
+            mappings_text += "- button: Use with click tool\n"
+            mappings_text += "- a (link): Use with click tool\n"
+            mappings_text += "- select: Use with select_option tool\n"
+            mappings_text += "\nNote: These are the annotated element IDs visible as numbered markers in the screenshot."
+            
+            return mappings_text
+            
+        except Exception as e:
+            return f"Error getting element mappings: {str(e)}"
+
+
 # List of all available tools
 ALL_TOOLS = [
     VisitUrlTool(),
@@ -1142,4 +1293,6 @@ ALL_TOOLS = [
     ScrollElementDownTool(),
     ScrollElementUpTool(),
     SummarizePageTool(),
+    GetElementMappingsTool(),
+    # DebugThoughtProcessTool(),
 ]

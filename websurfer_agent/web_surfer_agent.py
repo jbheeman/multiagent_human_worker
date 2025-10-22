@@ -68,10 +68,10 @@ class WebSurferAgent:
 
     # Size of the image we send to the MLM
     # Current values represent a 0.85 scaling to fit within the GPT-4v short-edge constraints (768px)
-    MLM_HEIGHT = 765
-    MLM_WIDTH = 1224
+    # Optimized for Gemma's 896x896 resolution
+    MLM_HEIGHT = 896
+    MLM_WIDTH = 896
 
-    SCREENSHOT_TOKENS = 1105
 
     def __init__(
         self,
@@ -209,8 +209,8 @@ class WebSurferAgent:
             # Also set it globally so tools can access it
             set_id_mapping(id_mapping)
             
-            # Resize for optimal tokens (matches magentic-ui sizing)
-            resized_img = annotated_img.resize((self.MLM_WIDTH, self.MLM_HEIGHT))
+            # Resize for optimal tokens with high-quality interpolation
+            resized_img = annotated_img.resize((self.MLM_WIDTH, self.MLM_HEIGHT), PIL.Image.Resampling.LANCZOS)
 
             # CRITICAL: Clean up old screenshots to prevent context bloat
             # Keep only the current and previous step screenshots
@@ -404,7 +404,7 @@ class WebSurferAgent:
         
         timestamp = int(time.time() * 1000)  # Use milliseconds for uniqueness
         screenshot_path = os.path.join(screenshots_dir, f"llm_screenshot_{timestamp}.png")
-        annotated_image.save(screenshot_path)
+        annotated_image.save(screenshot_path, "PNG", optimize=False, quality=100)
         print(f"📸 Saved LLM screenshot: {screenshot_path}")
         self.logger.info(f"Saved LLM screenshot to {screenshot_path}")
         
