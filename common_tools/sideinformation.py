@@ -9,10 +9,19 @@ def get_side_info(string: str) -> str:
     
 
 def load_side_info_from_metadata(file_path="gaia/metadata.jsonl"):
+    """Load side info from the first valid line in metadata.jsonl"""
     with open(file_path, 'r') as f:
-        line = f.readline().strip()
-        if line:
-            return json.loads(line)
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('//'):
+                continue
+            try:
+                data = json.loads(line)
+                annotator_metadata = data.get("Annotator Metadata", {})
+                if annotator_metadata:
+                    return get_side_info(json.dumps(annotator_metadata))
+            except json.JSONDecodeError:
+                continue
     return None
 
 

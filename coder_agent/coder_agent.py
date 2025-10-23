@@ -351,6 +351,8 @@ class CoderAgent:
         summarize_output: bool = False,
         work_dir: Optional[Path] = None,
         use_local_executor: bool = True,
+        system_prompt: Optional[str] = None,
+        prompt_templates: Optional[Dict] = None,
     ):
         """Initialize the CoderAgent.
         
@@ -362,12 +364,16 @@ class CoderAgent:
             summarize_output: Whether to summarize the code execution results
             work_dir: Working directory for code execution (if None, creates temp dir)
             use_local_executor: Whether to use local code executor (True) or Docker (False)
+            system_prompt: Custom system prompt to use instead of the default one
+            prompt_templates: Full prompt templates dictionary to use instead of default
         """
         self.name = name
         self.description = description
         self._model_client = model
         self._max_debug_rounds = max_debug_rounds
         self._summarize_output = summarize_output
+        self._system_prompt = system_prompt
+        self._prompt_templates = prompt_templates
         self.is_paused = False
         self._paused = asyncio.Event()
         
@@ -418,7 +424,20 @@ class CoderAgent:
         
         # Build the system prompt with current date
         date_today = datetime.now().strftime("%B %d, %Y")
-        system_prompt_coder = CODER_SYSTEM_PROMPT.format(date_today=date_today)
+        if self._prompt_templates and "system_prompt" in self._prompt_templates:
+            # Use system prompt from prompt templates
+            system_prompt_coder = self._prompt_templates["system_prompt"]
+            if "{date_today}" in system_prompt_coder:
+                system_prompt_coder = system_prompt_coder.format(date_today=date_today)
+        elif self._system_prompt:
+            # Use custom system prompt, format with date if it contains {date_today}
+            if "{date_today}" in self._system_prompt:
+                system_prompt_coder = self._system_prompt.format(date_today=date_today)
+            else:
+                system_prompt_coder = self._system_prompt
+        else:
+            # Use default system prompt
+            system_prompt_coder = CODER_SYSTEM_PROMPT.format(date_today=date_today)
         
         # Track inner messages
         inner_messages: List[TextMessage] = []

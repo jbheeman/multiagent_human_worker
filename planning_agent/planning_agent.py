@@ -42,6 +42,7 @@ class PlanningAgent:
             tools=[create_plan],
             model=model,
             max_steps=1, # Force the agent to stop after its one required action.
+            instructions=self._system_prompt,  # Pass system prompt as instructions
         )
 
     def run(self, user_goal: str) -> Plan:

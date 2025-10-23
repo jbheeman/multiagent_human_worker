@@ -128,6 +128,10 @@ class VisitUrlTool(Tool):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         
+        # Clear element mappings before navigation since we're going to a new page
+        global _id_mapping
+        _id_mapping = {}
+        
         # Navigate to the URL using the real PlaywrightController
         try:
             page = controller._page
@@ -135,7 +139,7 @@ class VisitUrlTool(Tool):
                 return f"Error: No page available. Browser not initialized."
             success, _ = loop.run_until_complete(controller.visit_page(page, url))
             if success:
-            # Reduced verbosity: only report URL; annotated markers are provided via screenshot callback
+                # Reduced verbosity: only report URL; annotated markers are provided via screenshot callback
                 return f"Navigated to {url}. Use the numbered markers in the latest screenshot to interact."
             else:
                 return f"Failed to navigate to {url}"
@@ -169,6 +173,10 @@ class WebSearchTool(Tool):
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+        
+        # Clear element mappings before search since we're navigating to a new page
+        global _id_mapping
+        _id_mapping = {}
         
         # Perform the search using the browser controller
         search_url = f"https://duckduckgo.com/?q={quote_plus(query)}"

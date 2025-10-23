@@ -93,6 +93,8 @@ class WebSurferAgent:
         use_action_guard: bool = False,
         search_engine: str = "duckduckgo",
         model_context_token_limit: Optional[int] = None,
+        system_prompt: Optional[str] = None,
+        prompt_templates: Optional[Dict] = None,
     ) -> None:
         """Initialize the WebSurfer."""
         self.name = name
@@ -103,6 +105,8 @@ class WebSurferAgent:
         self.debug_dir = debug_dir
         self.to_save_screenshots = to_save_screenshots
         self.to_resize_viewport = to_resize_viewport
+        self.system_prompt = system_prompt
+        self.prompt_templates = prompt_templates
         self.animate_actions = animate_actions
         self.max_actions_per_step = max_actions_per_step
         self.single_tab_mode = single_tab_mode
@@ -305,7 +309,9 @@ class WebSurferAgent:
             model=self.model,
             step_callbacks=[self._screenshot_callback],  # Enable vision!
             max_steps=self.max_actions_per_step,
+            prompt_templates=self.prompt_templates,  # Use full prompt templates if provided
         )
+        
         
         # Initialize ID mapping storage
         self._current_id_mapping = {}
@@ -447,7 +453,41 @@ class WebSurferAgent:
             )
             
             # Run the agent step by step to check for task completion
-            result = self.agent.run(initial_context)
+            try:
+                result = self.agent.run(initial_context)
+            except Exception as agent_error:
+                self.logger.error(f"Agent execution error: {agent_error}")
+                
+                # Try to recover by reducing max steps and retrying once
+                if hasattr(self.agent, 'max_steps') and self.agent.max_steps > 3:
+                    self.logger.info("Retrying with reduced max steps to avoid getting stuck")
+                    original_max_steps = self.agent.max_steps
+                    self.agent.max_steps = min(3, original_max_steps // 2)
+                    
+                    try:
+                        retry_context = (
+                            f"{initial_context}\n\n"
+                            f"Previous attempt failed with error: {str(agent_error)}. "
+                            f"Please try a different approach or element. "
+                            f"You have {self.agent.max_steps} steps remaining."
+                        )
+                        result = self.agent.run(retry_context)
+                        # Restore original max steps
+                        self.agent.max_steps = original_max_steps
+                    except Exception as retry_error:
+                        self.logger.error(f"Retry also failed: {retry_error}")
+                        # Restore original max steps
+                        self.agent.max_steps = original_max_steps
+                        error_context = f"Agent encountered errors in both attempts: {str(agent_error)} and {str(retry_error)}. "
+                        error_context += "This might be due to failed tool calls or page interaction issues. "
+                        error_context += "The task may need to be approached differently or the page may have changed."
+                        return error_context
+                else:
+                    # Provide helpful error context
+                    error_context = f"Agent encountered an error: {str(agent_error)}. "
+                    error_context += "This might be due to a failed tool call (e.g., trying to input text into a non-input element). "
+                    error_context += "The agent may need to retry with a different approach or element."
+                    return error_context
             
             # Check if any step contains a task completion marker
             for step in self.agent.memory.steps:
