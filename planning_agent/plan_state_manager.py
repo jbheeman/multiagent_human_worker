@@ -27,6 +27,12 @@ class PlanStateManager:
         if self.is_finished():
             return None
         return self.state.plan.steps[self.state.current_step_index].task
+
+    def get_next_step_task(self) -> str | None:
+        """Returns the task description for the next step, or None if it's the last step."""
+        if self.state.current_step_index + 1 >= len(self.state.plan.steps):
+            return None
+        return self.state.plan.steps[self.state.current_step_index + 1].task
     
     def is_finished(self) -> bool:
         """Checks if all steps in the plan have been completed."""
@@ -53,4 +59,4 @@ class PlanStateManager:
         # Increment the step index to move to the next step
         self.state.current_step_index += 1
         print(f"✅ PlanExecutor: State updated. Result stored under key '{result_key}'. Moved to step {self.state.current_step_index + 1}.")
-
+        

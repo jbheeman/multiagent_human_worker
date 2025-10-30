@@ -20,10 +20,11 @@ class FileSurfer:
             prompt_templates: Full prompt templates dictionary to use instead of default.
         """
         # Initialize the global browser instance located in the tools module
-        file_tools.browser = MarkdownFileBrowser(
-            base_path=base_path, 
-            viewport_size=viewport_size
-        )
+        if file_tools.browser is None:
+            file_tools.browser = MarkdownFileBrowser(
+                base_path=base_path, 
+                viewport_size=viewport_size
+            )
         
         self._system_prompt = system_prompt or DETAILED_SYSTEM_PROMPT
         self._prompt_templates = prompt_templates
@@ -43,7 +44,13 @@ class FileSurfer:
                 file_tools.find_next,
             ],
             model=model,
-            prompt_templates=prompt_templates_obj,
+            instructions="""You have access to the following tools:
+
+- open_path: Opens a file or a directory to view its contents. Paths are relative.
+- page_up: Scrolls the viewport up to the previous page in a large file.
+- page_down: Scrolls the viewport down to the next page in a large file.
+- find_on_page: Searches for text in the currently open file. The search starts from the current page and is case-insensitive, matching whole words (e.g., 'log' will not find 'logging'). It jumps the viewport to the first match it finds.
+- find_next: Jumps the viewport to the next match for the last search. The search will wrap around to the beginning of the file if it reaches the end."""
         )
 
     def run(self, task: str) -> str:
@@ -55,4 +62,6 @@ class FileSurfer:
             f"{file_tools.get_browser_state()}"
         )
         result = self._agent.run(initial_context)
-        return str(result)
+        return result
+
+
