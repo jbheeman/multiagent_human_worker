@@ -31,18 +31,61 @@ from Orchestrator import run_orchestrator_task
 from common_tools.sideinformation import get_side_info
 
 
-def load_tasks_from_metadata(file_path="gaia/metadata.jsonl"):
-    """Load all tasks from the metadata.jsonl file."""
+def load_tasks_from_metadata(file_path="gaia/metadata.jsonl", skip_attachments: bool = False):
+    """Load tasks from GAIA metadata. Supports JSONL and Parquet.
+
+    Args:
+        file_path: Path to metadata (.jsonl or .parquet)
+        skip_attachments: If True, skip tasks with a non-empty file_path
+    """
     tasks = []
-    
+
+    lower = file_path.lower()
+    if lower.endswith(".parquet"):
+        # Lazy import to avoid hard dependency if user sticks to jsonl
+        try:
+            import pyarrow.parquet as pq  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                "Reading Parquet requires pyarrow. Please install it: pip install pyarrow"
+            ) from e
+
+        table = pq.read_table(file_path)
+        rows = table.to_pylist()
+        for idx, row in enumerate(rows, 1):
+            task_id = row.get("task_id") or f"row_{idx}"
+            question = row.get("Question", "")
+            expected_answer = row.get("Final answer", "")
+            level = row.get("Level", "")
+            file_path_col = row.get("file_path", "") or row.get("file_name", "")
+            annotator = row.get("Annotator Metadata", {}) or {}
+
+            if skip_attachments and file_path_col:
+                continue
+
+            tasks.append({
+                'line_number': idx,
+                'task_id': task_id,
+                'question': question,
+                'expected_answer': expected_answer,
+                'level': level,
+                'annotator_metadata': annotator,
+                'raw_data': row,
+            })
+        return tasks
+
+    # Fallback: JSONL
     with open(file_path, 'r') as f:
         for line_num, line in enumerate(f, 1):
             line = line.strip()
             if not line or line.startswith('//'):
                 continue
-                
+
             try:
                 task_data = json.loads(line)
+                file_path_col = task_data.get('file_path', '') or task_data.get('file_name', '')
+                if skip_attachments and file_path_col:
+                    continue
                 tasks.append({
                     'line_number': line_num,
                     'task_id': task_data.get('task_id', f'line_{line_num}'),
@@ -55,7 +98,7 @@ def load_tasks_from_metadata(file_path="gaia/metadata.jsonl"):
             except json.JSONDecodeError as e:
                 print(f"Warning: Could not parse line {line_num}: {e}")
                 continue
-    
+
     return tasks
 
 
