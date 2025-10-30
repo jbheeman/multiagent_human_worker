@@ -118,7 +118,7 @@ def timeout_handler(signum, frame):
     """Signal handler for timeout"""
     raise TimeoutError("Task execution timed out")
 
-def capture_console_output_with_timeout(func, timeout_seconds=300, *args, **kwargs):
+def capture_console_output_with_timeout(func, timeout_seconds=600, *args, **kwargs):
     """Capture stdout and stderr from a function execution with timeout."""
     stdout_capture = StringIO()
     stderr_capture = StringIO()
@@ -128,8 +128,13 @@ def capture_console_output_with_timeout(func, timeout_seconds=300, *args, **kwar
     def run_task():
         nonlocal result, error
         try:
+            # The function now returns a tuple (result, log_dir_path)
             with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-                result = func(*args, **kwargs)
+                func_result = func(*args, **kwargs)
+            if isinstance(func_result, tuple) and len(func_result) == 2:
+                result = func_result # Keep the tuple (result, log_dir)
+            else:
+                result = (func_result, None) # Wrap in tuple if log_dir is not returned
         except Exception as e:
             error = traceback.format_exc()
     
@@ -140,20 +145,22 @@ def capture_console_output_with_timeout(func, timeout_seconds=300, *args, **kwar
     
     # Wait for completion or timeout
     task_thread.join(timeout=timeout_seconds)
+    # The line above is replaced with the one below to disable the timeout.
+    #task_thread.join()
     
     if task_thread.is_alive():
         # Task is still running, it timed out
         error = f"Task execution timed out after {timeout_seconds} seconds"
-        return None, stdout_capture.getvalue(), stderr_capture.getvalue(), error
+        return (None, None), stdout_capture.getvalue(), stderr_capture.getvalue(), error
     
     # Task completed (either successfully or with error)
     if error:
-        return None, stdout_capture.getvalue(), stderr_capture.getvalue(), error
+        return (None, None), stdout_capture.getvalue(), stderr_capture.getvalue(), error
     else:
         return result, stdout_capture.getvalue(), stderr_capture.getvalue(), None
 
 
-def save_task_output(output_dir, task, console_output, stderr_output, final_answer, execution_time, error=None):
+def save_task_output(output_dir, task, console_output, stderr_output, final_answer, execution_time, log_dir_path=None, error=None):
     """Save the output for a specific task."""
     task_id = task['task_id']
     task_dir = output_dir / f"task_{task_id}"
@@ -166,6 +173,8 @@ def save_task_output(output_dir, task, console_output, stderr_output, final_answ
         f.write(f"Expected Answer: {task['expected_answer']}\n")
         f.write(f"Level: {task['level']}\n")
         f.write(f"Execution Time: {execution_time:.2f} seconds\n")
+        if log_dir_path:
+            f.write(f"Detailed Log Directory: {log_dir_path}\n")
         f.write("=" * 80 + "\n\n")
         f.write("STDOUT:\n")
         f.write(console_output)
@@ -224,7 +233,7 @@ def run_benchmark(tasks, output_dir, max_tasks=None, timeout_seconds=300):
                     side_info = None
             
             # Run the orchestrator task with timeout
-            result, console_output, stderr_output, error = capture_console_output_with_timeout(
+            (result, log_dir_path), console_output, stderr_output, error = capture_console_output_with_timeout(
                 run_orchestrator_task,
                 timeout_seconds=timeout_seconds,
                 user_goal=task['question'],
@@ -247,7 +256,7 @@ def run_benchmark(tasks, output_dir, max_tasks=None, timeout_seconds=300):
             # Save outputs
             save_task_output(
                 output_dir, task, console_output, stderr_output, 
-                final_answer, execution_time, error
+                final_answer, execution_time, log_dir_path, error
             )
             
             # Store result summary
@@ -286,7 +295,7 @@ def run_benchmark(tasks, output_dir, max_tasks=None, timeout_seconds=300):
             
             # Save error output
             save_task_output(
-                output_dir, task, "", "", "Error occurred", execution_time, error_msg
+                output_dir, task, "", "", "Error occurred", execution_time, None, error_msg
             )
             
             # Store error result

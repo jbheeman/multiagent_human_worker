@@ -84,64 +84,54 @@ def run_orchestrator_task(user_goal, side_info=None):
     # print(f"Websurfer prompt templates: {websurfer_prompt_templates}")
     # print(f"File surfer prompt templates: {file_surfer_prompt_templates}")
 
-    # 1. Web surfer needs Gemma because its the only multimodal model that supports web surfing
-    WebSurferModel = OpenAIServerModel(
+    # 1. Define models for different roles
+    # gemma3 model for most agents
+    gemma_model = OpenAIServerModel(
         model_id="gemma3",
         api_base="https://ellm.nrp-nautilus.io/v1",
         api_key=os.getenv("NAUT_API_KEY"),
     )
 
-    # print(f"WebSurferModel: {WebSurferModel}")
-
-    # qwen3 model for orchestrator and planner since its better at reasoning
-    model = OpenAIServerModel(
+    # qwen3 model for planner and expert agents, as it's better at reasoning
+    planning_model = OpenAIServerModel(
         model_id="qwen3",
         api_base="https://ellm.nrp-nautilus.io/v1",
         api_key=os.getenv("NAUT_API_KEY"),
     )
 
     # can initialize human coworkers here with their own models
-    human_websurfer_coworker = WebSurferTool(model=WebSurferModel, prompt_templates=websurfer_prompt_templates)
-    human_file_coworker = FileSurferTool(model=model, prompt_templates=file_surfer_prompt_templates)
-    human_coder_coworker = CoderTool(model=model, prompt_templates=coder_prompt_templates)
+    human_websurfer_coworker = WebSurferTool(model=gemma_model, prompt_templates=websurfer_prompt_templates)
+    human_file_coworker = FileSurferTool(model=gemma_model, prompt_templates=file_surfer_prompt_templates)
+    human_coder_coworker = CoderTool(model=gemma_model, prompt_templates=coder_prompt_templates)
 
     # 2. Initialize the Planning Agent
     print("Initializing Planning Agent")
-    planner = PlanningAgent(model=model)
-    post_execution_critique = PostExecutionCritiqueAgent(model=model)
-    pre_execution_critique = PreExecutionCritiqueAgent(model=model)
-    web_surfer_tool = WebSurferTool(model=WebSurferModel)
+    planner = PlanningAgent(model=planning_model)
+    post_execution_critique = PostExecutionCritiqueAgent(model=gemma_model)
+    pre_execution_critique = PreExecutionCritiqueAgent(model=gemma_model)
+    web_surfer_tool = WebSurferTool(model=gemma_model)
     file_tools.browser = MarkdownFileBrowser(base_path=work_dir, viewport_size=4096)
     file_surfer_tool = FileSurferTool(
-        model=model,
+        model=gemma_model,
         base_path=work_dir,
         viewport_size=4096,
     )
-    coder_tool = CoderTool(
-        model=model,
-        max_debug_rounds=3,
-        use_local_executor=True,
-        work_dir=Path(work_dir),
-    )
-    llm_tool = create_llm_chat_tool(model=model)
+    coder_tool = CoderTool(model=gemma_model, max_debug_rounds=3, use_local_executor=True, work_dir=Path(work_dir))
+    llm_tool = create_llm_chat_tool(model=gemma_model)
     
     side_info = load_side_info_from_metadata()
-    expert_agent = ExpertAgent(name="Expert", model=model, side_info=side_info)
+    expert_agent = ExpertAgent(name="Expert", model=planning_model, side_info=side_info)
     set_expert_agent(expert_agent)
 
     manager_agent = ToolCallingAgent(
         tools=[web_surfer_tool, file_surfer_tool, coder_tool, llm_tool, WebSearchTool(), WikipediaSearchTool(), ask_human_expert_for_help],
-        model=model,
+        model=gemma_model,
         prompt_templates=orchestrator_prompt,
     )
     
 
     # --- Start of the Workflow ---
-
-    # 4. Get the user's high-level goal
-    user_goal = (
-        "Write a multi chapter fantasy tale about leaves on a tree. Save each chapter to the file chapter_name.txt"
-    )
+    # 4. Use the user's high-level goal provided as an argument
     logger.log_overview(f"\n🎯 User Goal: {user_goal}")
 
     # 5. Generate the plan
@@ -168,11 +158,26 @@ def run_orchestrator_task(user_goal, side_info=None):
     log_file.close()
     logger.log_overview(f"\n🔍 Expert Review: {simhuman_review}")
 
-    # Refine the plan based on the expert's review
-    replanner_agent = PlanningAgent(model=model)
-    replan_plan = replanner_agent.refine(user_goal, plan.model_dump_json(indent=2), simhuman_review)
-    logger.log_overview(f"\n🔍 Re-planned Plan: {replan_plan}")
+    # If the expert accepts the plan, use it directly. Otherwise, refine it.
+    if isinstance(simhuman_review, dict) and simhuman_review.get("feedback", "").lower() == "accept":
+        logger.log_overview("✅ Expert accepted the plan. Proceeding with original plan.")
+        replan_plan = plan
+    else:
+        logger.log_overview("\n--- 🔄 Refining Plan based on Expert Review ---")
+        # The simhuman_review is now a structured dictionary, which is what 'refine' expects.
+        replanner_agent = PlanningAgent(model=planning_model)
+        log_file = logger.get_log_file("PlanningAgent_Refine")
+        old_stdout = sys.stdout
+        sys.stdout = log_file
+        replan_plan = replanner_agent.refine(user_goal, plan.model_dump_json(indent=2), simhuman_review)
+        sys.stdout = old_stdout
+        log_file.close()
+        logger.log_overview("✅ Plan Refined")
 
+    logger.log_overview("\n--- Refined Plan ---")
+    for i, step in enumerate(replan_plan.steps):
+        logger.log_overview(f"Step {i+1}: {step.task} (output: {step.output_key})")
+    logger.log_overview("--------------------")
 
     logger.log_overview("\n--- 🏁 Starting Plan Execution ---")
     # Initialize the Plan State manager first
@@ -216,12 +221,12 @@ def run_orchestrator_task(user_goal, side_info=None):
         current_task = current_step.task
 
         # Recreate llm_tool with updated plan state
-        llm_tool = create_llm_chat_tool(model=model, plan_state=current_state)
+        llm_tool = create_llm_chat_tool(model=gemma_model, plan_state=current_state)
         
         # Recreate manager_agent with updated tools
         manager_agent = ToolCallingAgent(
             tools=[web_surfer_tool, file_surfer_tool, coder_tool, llm_tool, WebSearchTool(), ask_human_expert_for_help],
-            model=model,
+            model=gemma_model,
         )
 
         logger.log_overview("\n" + "=" * 50)
@@ -311,6 +316,3 @@ The result should be a clear, self-contained piece of information that can be ad
     final_state = state_manager.get_current_state()
     logger.log_overview("\nFinal Project State:")
     logger.log_overview(final_state.model_dump_json(indent=2))
-
-
-

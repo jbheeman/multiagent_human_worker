@@ -44,10 +44,10 @@ You need to provide a response to the AI's plan as the user.
 
 Case 1: If you believe the plan is perfect and will enable the AI to solve the task, respond with the following  string only: accept. The word "accept" only should be your response.
 
-Case 2: If you have feedback that can improve the plan and the chance of success, then write a response with natural language feedback to improve the plan.
-The helpful hints can be useful to improve the plan. Do not reveal the answer to the task directly.
-
-Phrase your response as if you are a user who is providing feedback to the AI. You are the user in this conversation.
+Case 2: If you have feedback, you MUST call the `provide_plan_feedback` tool.
+- The tool takes a single argument `feedback_data`, which is a JSON object.
+- This object must contain an `edits` list (for specific step changes) and a `feedback` string (for natural language explanation).
+- Do not reveal the answer to the task directly. Use the helpful hints to guide the AI.
 """
 
 

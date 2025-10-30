@@ -1,93 +1,44 @@
-from smolagents import tool, CodeAgent
+from smolagents import tool
 from smolagents.models import OpenAIServerModel
 import os
 from smolagents import ToolCallingAgent
 import json
-from typing import Optional
+from typing import Optional, List, Any
+from pydantic import BaseModel, Field
 
-SYSTEM_MESSAGE_PLANNING_PHASE_SOFT = """
-**Context:**
-You are tasked with role playing as a human user who is interacting with an AI to solve a task for you. 
+from .simulated_prompts import (
+    SYSTEM_MESSAGE_PLANNING_PHASE_SOFT,
+    SYSTEM_MESSAGE_EXECUTION_PHASE_SOFT,
+    SYSTEM_MESSAGE_PLANNING_PHASE_STRICT,
+    SYSTEM_MESSAGE_EXECUTION_PHASE_STRICT,
+    SYSTEM_MESSAGE_PLANNING_PHASE_NO_HINTS,
+    SYSTEM_MESSAGE_EXECUTION_PHASE_NO_HINTS,
+)
 
-The task is: {task} 
+# Pydantic models for structured plan feedback
+class PlanEdit(BaseModel):
+    """A specific edit for a single step in the plan."""
+    step_id: str = Field(..., description="The step_id of the plan step to be edited (e.g., 'step_1').")
+    task: Optional[str] = Field(None, description="The revised task description for the step.")
+    output_key: Optional[str] = Field(None, description="The revised output_key for the step.")
 
-The AI will provide a plan for the task in the past messages.
-
-The side information is: {side_info}
-
-The plan is: {plan}
-
-**INSTRUCTIONS:**
-
-Review the plan against your side information and provide structured feedback in this EXACT format:
-
-# critique = {{"edits": [...], "risks": [...], "hints": [...], "missing_preconditions": [...]}}
-
-Where:
-- edits: Specific changes needed to improve the plan
-- risks: Potential issues or problems with the current plan
-- hints: Helpful suggestions that don't reveal the answer directly
-- missing_preconditions: Important steps or information the plan is missing
-
-Do NOT reveal the ground truth answer directly. Instead, provide guidance through hints and edits.
-"""
-
-SYSTEM_MESSAGE_EXECUTION_PHASE = """
-**Context:**
-You are a knowledgeable human user helping an AI agent execute a task. The AI is currently stuck or needs guidance on a specific step.
-
-The overall task is: {task}
-
-The current step being executed is: {current_step}
-
-The current state/results so far: {current_state}
-
-The side information available to you: {side_info}
-
-**INSTRUCTIONS:**
-
-Provide helpful guidance to help the AI agent proceed with the current step. Your response should:
-
-1. **Analyze the current situation** - What has been done so far and what's the current challenge?
-2. **Provide specific guidance** - Give concrete suggestions for how to proceed
-3. **Offer hints** - Share relevant information that helps without revealing the final answer
-4. **Suggest next actions** - Recommend specific tools or approaches to try
-
-**IMPORTANT:** 
-- Do NOT reveal the ground truth answer directly
-- Focus on helping the AI learn and discover the answer through guidance
-- Be encouraging and supportive in your tone
-- Provide actionable advice that moves the task forward
-
-Format your response as helpful guidance that an AI agent can follow.
-"""
-
-
+class PlanFeedback(BaseModel):
+    """A container for plan feedback, including specific edits and overall comments."""
+    edits: List[PlanEdit] = Field(default_factory=list, description="A list of specific edits to apply to the plan steps.")
+    feedback: str = Field(..., description="Natural language feedback explaining the reasoning for the edits and providing overall guidance.")
 
 @tool
-def review_plan(plan: str) -> str:
+def provide_plan_feedback(feedback_data: PlanFeedback) -> str:
     """
-    Use this function to review the plan and provide feedback on the plan.
+    Use this tool to provide structured feedback on a plan.
     Args:
-        plan: The plan to review.
+        feedback_data: A JSON object containing a list of 'edits' and a 'feedback' string.
     Returns:
-        The feedback on the plan.
+        A confirmation that feedback has been provided.
     """
-    return "I have reviewed the plan and provided feedback on the plan."
-
-@tool
-def help_with_execution(task: str, current_step: str, current_state: str, side_info: str) -> str:
-    """
-    Use this function to get help from a simulated human expert during task execution.
-    Args:
-        task: The overall task being worked on.
-        current_step: The current step that needs help.
-        current_state: The current state/results so far.
-        side_info: Side information available to the expert.
-    Returns:
-        Helpful guidance to proceed with the current step.
-    """
-    return "I have provided guidance for the current execution step."
+    # This function's body is not critical as we just want the structured arguments.
+    # The agent's output will be the tool call itself.
+    return "Feedback provided."
 
 class ExpertAgent:
     def __init__(self, name: str, model: OpenAIServerModel, side_info: str):
@@ -98,28 +49,27 @@ class ExpertAgent:
         Instead, it is prompted to guide Orchestrator to find the answer indirectly. 
         """
         self.name = name
-        self.agent = ToolCallingAgent(name=name, model=model, description=description, tools=[review_plan, help_with_execution], max_steps=1)
+        # The agent's only purpose is to call the provide_plan_feedback tool
+        self.agent = ToolCallingAgent(name=name, model=model, description=description, tools=[provide_plan_feedback], max_steps=1)
         self.side_info = side_info
         self.description = description
 
-    def review_plan(self, task: str, plan: str, side_info: str) -> str:
-        prompt = SYSTEM_MESSAGE_PLANNING_PHASE_SOFT.format(task=task, plan=plan, side_info=side_info)
+    def review_plan(self, task: str, plan: str, side_info: str) -> dict[str, Any]:
+        prompt = SYSTEM_MESSAGE_PLANNING_PHASE_SOFT.format(task=task, plan=plan, helpful_task_hints=side_info, answer="") # Assuming soft has answer
         print(f"Prompt: {prompt}")
         result = self.agent.run(prompt)
-      
-        try:
-            if "# critique = " in str(result):
-                critique_line = [line for line in str(result).split('\n') if "# critique = " in line][0]
-                critique_json = critique_line.replace("# critique = ", "").strip()
-                critique_dict = json.loads(critique_json)
-                return critique_dict
-        except (json.JSONDecodeError, IndexError):
-            pass
-
-
         
-        # Fallback: return the raw result
-        return str(result)
+        if isinstance(result, str) and result.strip().lower() == "accept":
+            return {"edits": [], "feedback": "accept"}
+
+        # The result of a ToolCallingAgent run is a dictionary representing the tool call
+        if isinstance(result, dict) and result.get("name") == "provide_plan_feedback":
+            # The arguments are parsed into a dictionary; we need the nested 'feedback_data' object.
+            return result["arguments"]["feedback_data"]
+
+        # Fallback for unexpected responses
+        print(f"Warning: ExpertAgent returned an unexpected format: {result}")
+        return {"edits": [], "feedback": str(result) if result else "No feedback provided."}
 
     def help_with_execution(self, task: str, current_step: str, current_state: str) -> str:
         """
@@ -133,7 +83,7 @@ class ExpertAgent:
         Returns:
             Helpful guidance to proceed with the current step
         """
-        prompt = SYSTEM_MESSAGE_EXECUTION_PHASE.format(
+        prompt = SYSTEM_MESSAGE_EXECUTION_PHASE_SOFT.format(
             task=task, 
             current_step=current_step, 
             current_state=current_state, 
