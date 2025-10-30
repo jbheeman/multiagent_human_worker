@@ -86,6 +86,40 @@ class PlanningAgent:
         print(f"✅ PlanningAgent: Plan created successfully with {len(plan.steps)} steps.")
         return plan
 
+    def refine(self, user_goal: str, prior_plan_summary: str, reviewed_plan: str) -> Plan:
+        """
+        Re-generate a plan that incorporates any edits/critique from an expert review.
+        The model must call `create_plan` with a complete, consistent plan JSON.
+        """
+      
+        prompt = (
+            f"{self._system_prompt}\n\n"
+            "You will refine a prior plan using edits/critique from an expert review. "
+            "Return a *complete* plan via a single call to `create_plan`.\n\n"
+            "--- USER GOAL ---\n"
+            f"{user_goal}\n\n"
+            "--- PRIOR PLAN SUMMARY ---\n"
+            f"{prior_plan_summary}\n\n"
+            "--- EDITS/CRITIQUE (must apply) ---\n"
+            f"{reviewed_plan}\n\n"
+            "Call `create_plan` with the full plan JSON."
+        )
+
+        
+        self._agent.run(prompt)
+
+        # Extract tool call as in your `run()`
+        tool_calls = None
+        for step in self._agent.memory.steps:
+            if isinstance(step, ActionStep) and step.tool_calls:
+                tool_calls = step.tool_calls
+                break
+        if not tool_calls or tool_calls[0].name != 'create_plan':
+            raise ValueError("Refine: no `create_plan` call found.")
+
+        plan_data = tool_calls[0].arguments
+        return Plan(**plan_data)
+
 # Example usage to test the planner independently
 if __name__ == "__main__":
     model = OpenAIServerModel(

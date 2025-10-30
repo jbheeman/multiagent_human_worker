@@ -19,12 +19,15 @@ from file_surfer_agent.markdown_file_browser import MarkdownFileBrowser
 from coder_agent.coder_tool import CoderTool
 from common_tools.llm_chat_tool import create_llm_chat_tool
 from common_tools.logger import Logger
+from common_tools.sideinformation import get_side_info, load_side_info_from_metadata
 
 # Planner and state manager
 from planning_agent.planning_agent import PlanningAgent
 from planning_agent.plan_state_manager import PlanStateManager
 from critique_agent.critique_agent import PostExecutionCritiqueAgent, PreExecutionCritiqueAgent
 
+#Expert agent
+from simulated_humans.simulated_human import ExpertAgent, ask_human_expert_for_help, set_expert_agent
 
 def main():
     """
@@ -52,12 +55,18 @@ def main():
         api_base="https://ellm.nrp-nautilus.io/v1",
         api_key=os.environ.get("NAUT_API_KEY", "your_default_api_key"),
     )
+    
+    WebSurferModel = OpenAIServerModel(
+        model_id="gemma3",
+        api_base="https://ellm.nrp-nautilus.io/v1",
+        api_key=os.getenv("NAUT_API_KEY"),
+    )
 
     # 2. Initialize Agents and Tools
     planner = PlanningAgent(model=model)
     post_execution_critique = PostExecutionCritiqueAgent(model=model)
     pre_execution_critique = PreExecutionCritiqueAgent(model=model)
-    web_surfer_tool = WebSurferTool(model=model)
+    web_surfer_tool = WebSurferTool(model=WebSurferModel)
     file_tools.browser = MarkdownFileBrowser(base_path=work_dir, viewport_size=4096)
     file_surfer_tool = FileSurferTool(
         model=model,
@@ -69,6 +78,16 @@ def main():
         max_debug_rounds=3,
         use_local_executor=True,
         work_dir=Path(work_dir),
+    )
+    llm_tool = create_llm_chat_tool(model=model)
+    
+    side_info = load_side_info_from_metadata()
+    expert_agent = ExpertAgent(name="Expert", model=model, side_info=side_info)
+    set_expert_agent(expert_agent)
+
+    manager_agent = ToolCallingAgent(
+        tools=[web_surfer_tool, file_surfer_tool, coder_tool, llm_tool, WebSearchTool(), ask_human_expert_for_help],
+        model=model,
     )
     
 
@@ -94,10 +113,25 @@ def main():
         logger.log_overview(f"Step {i+1}: {step.task}")
     logger.log_overview("--------------------")
 
+    # Expert review of the plan
+    logger.log_overview("\n--- 🧑‍🏫 Expert Review of the Plan ---")
+    log_file = logger.get_log_file("ExpertAgent")
+    old_stdout = sys.stdout
+    sys.stdout = log_file
+    simhuman_review = expert_agent.review_plan(user_goal, plan.model_dump_json(indent=2), side_info)
+    sys.stdout = old_stdout
+    log_file.close()
+    logger.log_overview(f"\n🔍 Expert Review: {simhuman_review}")
+
+    # Refine the plan based on the expert's review
+    replanner_agent = PlanningAgent(model=model)
+    replan_plan = replanner_agent.refine(user_goal, plan.model_dump_json(indent=2), simhuman_review)
+    logger.log_overview(f"\n🔍 Re-planned Plan: {replan_plan}")
+
 
     logger.log_overview("\n--- 🏁 Starting Plan Execution ---")
     # Initialize the Plan State manager first
-    state_manager = PlanStateManager(user_goal, plan)
+    state_manager = PlanStateManager(user_goal, replan_plan)
 
     # 7. Main execution loop, driven by the orchestrator
     next_step_suggestion = ""
@@ -141,7 +175,7 @@ def main():
         
         # Recreate manager_agent with updated tools
         manager_agent = ToolCallingAgent(
-            tools=[web_surfer_tool, file_surfer_tool, coder_tool, llm_tool, WebSearchTool()],
+            tools=[web_surfer_tool, file_surfer_tool, coder_tool, llm_tool, WebSearchTool(), ask_human_expert_for_help],
             model=model,
         )
 
