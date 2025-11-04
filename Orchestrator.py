@@ -21,15 +21,9 @@ import yaml
 
 # Tools
 from websurfer_agent.web_surfer_tool import WebSurferTool
-from file_surfer_agent.file_surfer_tool import FileSurferTool
-from file_surfer_agent import file_tools
-from file_surfer_agent.markdown_file_browser import MarkdownFileBrowser
-from coder_agent.coder_tool import CoderTool
 from common_tools.llm_chat_tool import create_llm_chat_tool
-from common_tools.sideinformation import get_side_info
-from common_tools.sideinformation import load_side_info_from_metadata
 from common_tools.logger import Logger
-from common_tools.sideinformation import get_side_info, load_side_info_from_metadata
+from common_tools.sideinformation import load_side_info_for_user
 
 # Planner and state manager
 from planning_agent.planning_agent import PlanningAgent
@@ -37,12 +31,9 @@ from planning_agent.plan_state_manager import PlanStateManager
 from critique_agent.critique_agent import PostExecutionCritiqueAgent, PreExecutionCritiqueAgent
 
 #Expert agent
-from simulated_humans.simulated_human import ExpertAgent, ask_human_expert_for_help, set_expert_agent
+from simulated_humans.simulated_human import SimulatedHumanAgent, ask_human_expert_for_help, set_simulated_human_agent
 
-#Expert agent
-from simulated_humans.simulated_human import ExpertAgent, ask_human_expert_for_help, set_expert_agent
-
-def run_orchestrator_task(user_goal, side_info=None):
+def run_orchestrator_task(user_goal, user_id, side_info=None):
     """
     Run the orchestrator task with a given user goal and optional side information.
     
@@ -70,19 +61,11 @@ def run_orchestrator_task(user_goal, side_info=None):
     logger.log_overview(f"Working directory for this run: {work_dir}")
 
     orchestrator_prompt = yaml.safe_load(open("orchestrator_agent.yaml").read())
-    coder_prompt_template = yaml.safe_load(open("coder_coworker.yaml").read())
-    websurfer_prompt_template = yaml.safe_load(open("websurfer_coworker.yaml").read())
-    file_surfer_prompt_template = yaml.safe_load(open("file_coworker.yaml").read())
-    
-    # Use full prompt templates for proper smolagents integration
-    coder_prompt_templates = coder_prompt_template
-    websurfer_prompt_templates = websurfer_prompt_template
-    file_surfer_prompt_templates = file_surfer_prompt_template
+   
+    simulated_human_prompt_template = yaml.safe_load(open("simulated_human_coworker.yaml").read())
+    simulated_human_prompt_templates = simulated_human_prompt_template
 
-    # print("Loaded prompt templates:")
-    # print(f"Coder prompt templates: {coder_prompt_templates}")
-    # print(f"Websurfer prompt templates: {websurfer_prompt_templates}")
-    # print(f"File surfer prompt templates: {file_surfer_prompt_templates}")
+
 
     # 1. Define models for different roles
     # gemma3 model for most agents
@@ -99,32 +82,22 @@ def run_orchestrator_task(user_goal, side_info=None):
         api_key=os.getenv("NAUT_API_KEY"),
     )
 
-    # can initialize human coworkers here with their own models
-    human_websurfer_coworker = WebSurferTool(model=gemma_model, prompt_templates=websurfer_prompt_templates)
-    human_file_coworker = FileSurferTool(model=gemma_model, prompt_templates=file_surfer_prompt_templates)
-    human_coder_coworker = CoderTool(model=gemma_model, prompt_templates=coder_prompt_templates)
-
+ 
     # 2. Initialize the Planning Agent
     print("Initializing Planning Agent")
     planner = PlanningAgent(model=planning_model)
     post_execution_critique = PostExecutionCritiqueAgent(model=gemma_model)
     pre_execution_critique = PreExecutionCritiqueAgent(model=gemma_model)
     web_surfer_tool = WebSurferTool(model=gemma_model)
-    file_tools.browser = MarkdownFileBrowser(base_path=work_dir, viewport_size=4096)
-    file_surfer_tool = FileSurferTool(
-        model=gemma_model,
-        base_path=work_dir,
-        viewport_size=4096,
-    )
-    coder_tool = CoderTool(model=gemma_model, max_debug_rounds=3, use_local_executor=True, work_dir=Path(work_dir))
+   
     llm_tool = create_llm_chat_tool(model=gemma_model)
     
-    side_info = load_side_info_from_metadata()
-    expert_agent = ExpertAgent(name="Expert", model=planning_model, side_info=side_info)
-    set_expert_agent(expert_agent)
+    persona_info = load_side_info_for_user(user_id)
+    simulated_human_agent = SimulatedHumanAgent(name="SimulatedHuman", model=planning_model, side_info=persona_info, prompt_templates=simulated_human_prompt_templates)
+    set_simulated_human_agent(simulated_human_agent)
 
     manager_agent = ToolCallingAgent(
-        tools=[web_surfer_tool, file_surfer_tool, coder_tool, llm_tool, WebSearchTool(), WikipediaSearchTool(), ask_human_expert_for_help],
+        tools=[web_surfer_tool, llm_tool, WebSearchTool(), WikipediaSearchTool(), ask_human_expert_for_help],
         model=gemma_model,
         prompt_templates=orchestrator_prompt,
     )
@@ -148,12 +121,12 @@ def run_orchestrator_task(user_goal, side_info=None):
         logger.log_overview(f"Step {i+1}: {step.task}")
     logger.log_overview("--------------------")
 
-    # Expert review of the plan
+    # Expert review of the plan - do we still do this? or does the orchestrator just ask the simulated human agent for help? ifl now the plan doesnt really need to be reivewd? 
     logger.log_overview("\n--- 🧑‍🏫 Expert Review of the Plan ---")
-    log_file = logger.get_log_file("ExpertAgent")
+    log_file = logger.get_log_file("SimulatedHumanAgent")
     old_stdout = sys.stdout
     sys.stdout = log_file
-    simhuman_review = expert_agent.review_plan(user_goal, plan.model_dump_json(indent=2), side_info)
+    simhuman_review = simulated_human_agent.review_plan(user_goal, plan.model_dump_json(indent=2), side_info)
     sys.stdout = old_stdout
     log_file.close()
     logger.log_overview(f"\n🔍 Expert Review: {simhuman_review}")
@@ -244,11 +217,6 @@ This subtask is a part of the larger goal: "{user_goal}". You do not need to com
 
 Results so far, formatted as [prior_step_id]_[prior_result] (JSON):
 {results_json}
-
---- File Writing Guidelines ---
-- Do not use generic filenames like `results.txt` for intermediate files. Use descriptive names that reflect the content (e.g., `leaf_research_notes.txt`).
-- Only write to a file when the task explicitly requires it.
-- For intermediate results, it is often better to return the text directly instead of writing to a file.
 
 Analyze the subtask and the available results, choose the best tools, execute it, and return the result of your action.
 The result should be a clear, self-contained piece of information that can be added to the project state.

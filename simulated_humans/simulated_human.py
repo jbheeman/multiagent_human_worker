@@ -40,13 +40,12 @@ def provide_plan_feedback(feedback_data: PlanFeedback) -> str:
     # The agent's output will be the tool call itself.
     return "Feedback provided."
 
-class ExpertAgent:
+class SimulatedHumanAgent:
     def __init__(self, name: str, model: OpenAIServerModel, side_info: str):
         description = """
-        The expert agent is an LLM without any tools, instructed to interact with the orchestrator the way we expect a human would act.
-        This expert has access to side information about each task, which includes a human-written plan to solve the task.
-        It is not to reveal the ground-truth answer directly as the answer is usually found inside the human written plan. 
-        Instead, it is prompted to guide Orchestrator to find the answer indirectly. 
+        The simulated human agent is an LLM without any tools, instructed to interact with the orchestrator the way we expect a human would act.
+        This simulated human has access to persona information and purchases about the user.
+        Instead, it is prompted to guide Orchestrator to recommend products to the user. 
         """
         self.name = name
         # The agent's only purpose is to call the provide_plan_feedback tool
@@ -96,12 +95,12 @@ class ExpertAgent:
 
 
 # Global variable to store the expert agent instance for the tool
-_expert_agent_instance = None
+_simulated_human_agent_instance = None
 
-def set_expert_agent(expert_agent: ExpertAgent):
+def set_simulated_human_agent(simulated_human_agent: SimulatedHumanAgent):
     """Set the global expert agent instance for the tool"""
-    global _expert_agent_instance
-    _expert_agent_instance = expert_agent
+    global _simulated_human_agent_instance
+    _simulated_human_agent_instance = simulated_human_agent
 
 @tool
 def ask_human_expert_for_help(task: str, current_step: str, current_state: str) -> str:
@@ -116,10 +115,10 @@ def ask_human_expert_for_help(task: str, current_step: str, current_state: str) 
     Returns:
         Helpful guidance from the simulated human expert to proceed with the current step
     """
-    if _expert_agent_instance is None:
-        return "Error: Expert agent not initialized. Please call set_expert_agent() first."
+    if _simulated_human_agent_instance is None:
+        return "Error: Simulated human agent not initialized. Please call set_simulated_human_agent() first."
     
-    return _expert_agent_instance.help_with_execution(task, current_step, current_state)
+    return _simulated_human_agent_instance.help_with_execution(task, current_step, current_state)
 
 
 if __name__ == "__main__":
@@ -129,5 +128,5 @@ if __name__ == "__main__":
         api_key=os.environ.get("NAUT_API_KEY", "your_default_api_key"),
     )
 
-    expert = ExpertAgent(name="Expert", model=model, side_info="The capital of France is Paris.")
-    expert.review_plan(task="What is the capital of France?", plan="Search the internet for the capital of France.", side_info=expert.side_info)
+    simulated_human_agent = SimulatedHumanAgent(name="SimulatedHuman", model=model, side_info="The capital of France is Paris.")
+    simulated_human_agent.review_plan(task="What is the capital of France?", plan="Search the internet for the capital of France.", side_info=simulated_human_agent.side_info)

@@ -1,28 +1,48 @@
-# from typing import (
-#     str
-# )
+from typing import Optional
 import json
 import re
+import pandas as pd
+
+# Cache for user dataframe to avoid reloading
+_user_df_cache = None
+
 def get_side_info(string: str) -> str:
    
     return _format_to_json(string)
     
 
-def load_side_info_from_metadata(file_path="gaia/metadata.jsonl"):
-    """Load side info from the first valid line in metadata.jsonl"""
-    with open(file_path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('//'):
-                continue
-            try:
-                data = json.loads(line)
-                annotator_metadata = data.get("Annotator Metadata", {})
-                if annotator_metadata:
-                    return get_side_info(json.dumps(annotator_metadata))
-            except json.JSONDecodeError:
-                continue
-    return None
+
+def load_side_info_for_user(user_id: str, parquet_path: str = "hf://datasets/NEU-HAI/OPeRA/OPeRA_full/user/train/train.parquet") -> Optional[str]:
+    """
+    Load persona information for a specific user from the OPeRA dataset.
+    
+    Args:
+        user_id: The user ID to look up
+        parquet_path: Path to the OPeRA user parquet file (default uses HuggingFace datasets)
+        
+    Returns:
+        The persona/interview transcript as a string, or None if user not found
+    """
+    global _user_df_cache
+    
+    # Load user dataframe (cache it to avoid reloading)
+    if _user_df_cache is None:
+        _user_df_cache = pd.read_parquet(parquet_path)
+    
+    # Find the user
+    user_row = _user_df_cache[_user_df_cache["user_id"] == user_id]
+    
+    if len(user_row) == 0:
+        return None
+    
+    # Extract the persona/interview transcript
+    persona_info = user_row["interview_transcript_processed"].values[0]
+    
+    # Return as string (handle NaN/None cases)
+    if pd.isna(persona_info):
+        return None
+    
+    return str(persona_info)
 
 
 def _format_to_json(string)->str:
