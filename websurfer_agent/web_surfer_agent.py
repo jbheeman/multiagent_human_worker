@@ -274,9 +274,9 @@ class WebSurferAgent:
             # Format marker information with compact details
             marker_info = format_element_details(ed_data, delta)
             
-            # Debug: Log the compact element details
-            self.logger.info(f"Compact element details: {ed_data}")
-            self.logger.info(f"Formatted marker info: {marker_info[:200]}...")
+            # # Debug: Log the compact element details
+            # self.logger.info(f"Compact element details: {ed_data}")
+            # self.logger.info(f"Formatted marker info: {marker_info[:200]}...")
             
             # Add codebook once at the start
             if not self._codebook_sent:
@@ -403,16 +403,16 @@ class WebSurferAgent:
             annotated_image.save(debug_path)
             self.logger.debug(f"Saved annotated screenshot to {debug_path}")
         
-        # Always save screenshots to the screenshots directory for debugging
-        screenshots_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "screenshots")
-        if not os.path.exists(screenshots_dir):
-            os.makedirs(screenshots_dir, exist_ok=True)
+        # # Always save screenshots to the screenshots directory for debugging
+        # screenshots_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "screenshots")
+        # if not os.path.exists(screenshots_dir):
+        #     os.makedirs(screenshots_dir, exist_ok=True)
         
-        timestamp = int(time.time() * 1000)  # Use milliseconds for uniqueness
-        screenshot_path = os.path.join(screenshots_dir, f"llm_screenshot_{timestamp}.png")
-        annotated_image.save(screenshot_path, "PNG", optimize=False, quality=100)
-        print(f"📸 Saved LLM screenshot: {screenshot_path}")
-        self.logger.info(f"Saved LLM screenshot to {screenshot_path}")
+        # timestamp = int(time.time() * 1000)  # Use milliseconds for uniqueness
+        # screenshot_path = os.path.join(screenshots_dir, f"llm_screenshot_{timestamp}.png")
+        # annotated_image.save(screenshot_path, "PNG", optimize=False, quality=100)
+        # print(f"📸 Saved LLM screenshot: {screenshot_path}")
+        # self.logger.info(f"Saved LLM screenshot to {screenshot_path}")
         
         return annotated_image, visible_ids, ids_above, ids_below, id_mapping, interactive_regions
 
