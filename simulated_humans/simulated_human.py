@@ -1,132 +1,89 @@
 from smolagents import tool
 from smolagents.models import OpenAIServerModel
 import os
-from smolagents import ToolCallingAgent
 import json
-from typing import Optional, List, Any
-from pydantic import BaseModel, Field
-
-from .simulated_prompts import (
-    SYSTEM_MESSAGE_PLANNING_PHASE_SOFT,
-    SYSTEM_MESSAGE_EXECUTION_PHASE_SOFT,
-    SYSTEM_MESSAGE_PLANNING_PHASE_STRICT,
-    SYSTEM_MESSAGE_EXECUTION_PHASE_STRICT,
-    SYSTEM_MESSAGE_PLANNING_PHASE_NO_HINTS,
-    SYSTEM_MESSAGE_EXECUTION_PHASE_NO_HINTS,
-)
-
-# Pydantic models for structured plan feedback
-class PlanEdit(BaseModel):
-    """A specific edit for a single step in the plan."""
-    step_id: str = Field(..., description="The step_id of the plan step to be edited (e.g., 'step_1').")
-    task: Optional[str] = Field(None, description="The revised task description for the step.")
-    output_key: Optional[str] = Field(None, description="The revised output_key for the step.")
-
-class PlanFeedback(BaseModel):
-    """A container for plan feedback, including specific edits and overall comments."""
-    edits: List[PlanEdit] = Field(default_factory=list, description="A list of specific edits to apply to the plan steps.")
-    feedback: str = Field(..., description="Natural language feedback explaining the reasoning for the edits and providing overall guidance.")
-
-@tool
-def provide_plan_feedback(feedback_data: PlanFeedback) -> str:
-    """
-    Use this tool to provide structured feedback on a plan.
-    Args:
-        feedback_data: A JSON object containing a list of 'edits' and a 'feedback' string.
-    Returns:
-        A confirmation that feedback has been provided.
-    """
-    # This function's body is not critical as we just want the structured arguments.
-    # The agent's output will be the tool call itself.
-    return "Feedback provided."
-
+from typing import Optional, Dict, Any
+from simulated_prompts import SIMULATED_HUMAN_PROMPT
+from sideinformation import load_behavior_info
 class SimulatedHumanAgent:
-    def __init__(self, name: str, model: OpenAIServerModel, side_info: str):
-        description = """
-        The simulated human agent is an LLM without any tools, instructed to interact with the orchestrator the way we expect a human would act.
-        This simulated human has access to persona information and purchases about the user.
-        Instead, it is prompted to guide Orchestrator to recommend products to the user. 
+    def __init__(self, name: str, model: OpenAIServerModel, user_products: Dict[str, Any]):
         """
-        self.name = name
-        # The agent's only purpose is to call the provide_plan_feedback tool
-        self.agent = ToolCallingAgent(name=name, model=model, description=description, tools=[provide_plan_feedback], max_steps=1)
-        self.side_info = side_info
-        self.description = description
-
-    def review_plan(self, task: str, plan: str, side_info: str) -> dict[str, Any]:
-        prompt = SYSTEM_MESSAGE_PLANNING_PHASE_SOFT.format(task=task, plan=plan, helpful_task_hints=side_info, answer="") # Assuming soft has answer
-        print(f"Prompt: {prompt}")
-        result = self.agent.run(prompt)
-        
-        if isinstance(result, str) and result.strip().lower() == "accept":
-            return {"edits": [], "feedback": "accept"}
-
-        # The result of a ToolCallingAgent run is a dictionary representing the tool call
-        if isinstance(result, dict) and result.get("name") == "provide_plan_feedback":
-            # The arguments are parsed into a dictionary; we need the nested 'feedback_data' object.
-            return result["arguments"]["feedback_data"]
-
-        # Fallback for unexpected responses
-        print(f"Warning: ExpertAgent returned an unexpected format: {result}")
-        return {"edits": [], "feedback": str(result) if result else "No feedback provided."}
-
-    def help_with_execution(self, task: str, current_step: str, current_state: str) -> str:
-        """
-        Get help from the simulated human expert during task execution.
+        Initialize the simulated human agent.
         
         Args:
-            task: The overall task being worked on
-            current_step: The current step that needs help
-            current_state: The current state/results so far
+            name: Name of the agent
+            model: The LLM model to use
+            user_products: Dictionary of products the user bought/clicked on (the "golden truth")
+        """
+        description = """
+        The simulated human agent represents a real user with specific preferences and purchase history.
+        It can answer questions about what the user likes, what products they would be interested in,
+        and provide guidance based on the user's past behavior and preferences.
+        It will not reveal any items from the Golden Truth to the orchestrator.
+        """
+        self.name = name
+        self.model = model
+        self.user_products = user_products  # The "golden truth" - products user actually interacted with
+        
+        # Create a simple agent that can answer questions (no tools needed, just direct responses)
+        # We'll use a simple prompt-based approach instead of tool calling
+        self.description = description
+
+    def answer_question(self, question: str, context: Optional[str] = None) -> str:
+        """
+        Answer a question about the user's preferences based on their product history and persona.
+        
+        Args:
+            question: The question being asked (e.g., "What does the human like?", "Would this item be liked by the human?")
+            context: Optional context about what the orchestrator is currently looking at/considering
             
         Returns:
-            Helpful guidance to proceed with the current step
+            An answer based on the user's product history and persona
         """
-        prompt = SYSTEM_MESSAGE_EXECUTION_PHASE_SOFT.format(
-            task=task, 
-            current_step=current_step, 
-            current_state=current_state, 
-            side_info=self.side_info
-        )
-        print(f"Co-execution prompt: {prompt}")
-        result = self.agent.run(prompt)
-        return str(result)
+        # Format the user products for the prompt
+        # products_summary = json.dumps(self.user_products, indent=2)
+        
+        prompt = SIMULATED_HUMAN_PROMPT.format(user_products=self.user_products, question=question)
+        messages = [{"role": "user", "content": prompt}]
+        response = self.model(messages)
+        
+        return response.content
 
-
-
-# Global variable to store the expert agent instance for the tool
+# Global variable to store the simulated human agent instance
 _simulated_human_agent_instance = None
 
 def set_simulated_human_agent(simulated_human_agent: SimulatedHumanAgent):
-    """Set the global expert agent instance for the tool"""
+    """Set the global simulated human agent instance for the tool"""
     global _simulated_human_agent_instance
     _simulated_human_agent_instance = simulated_human_agent
 
 @tool
-def ask_human_expert_for_help(task: str, current_step: str, current_state: str) -> str:
+def ask_human_expert_for_help(question: str, context: Optional[str] = None) -> str:
     """
-    Ask a simulated human expert for help during task execution when stuck or needing guidance.
+    Ask the simulated human about user preferences or whether they would like a product.
     
     Args:
-        task: The overall task being worked on
-        current_step: The current step that needs help  
-        current_state: The current state/results so far
+        question: The question to ask (e.g., "What does the human like?", 
+                  "Would this item be liked by the human?", 
+                  "What categories of products does the user prefer?")
+        context: Optional context about what product/item is being considered
         
     Returns:
-        Helpful guidance from the simulated human expert to proceed with the current step
+        An answer from the simulated human based on their product history and persona
     """
     if _simulated_human_agent_instance is None:
         return "Error: Simulated human agent not initialized. Please call set_simulated_human_agent() first."
     
-    return _simulated_human_agent_instance.help_with_execution(task, current_step, current_state)
-
+    return _simulated_human_agent_instance.answer_question(question, context)
 
 if __name__ == "__main__":
     model = OpenAIServerModel(
         model_id="gemma3",
         api_base="https://ellm.nrp-nautilus.io/v1",
-        api_key=os.environ.get("NAUT_API_KEY", "your_default_api_key"),
+        api_key=os.environ.get("NAUT_API_KEY"),
     )
-
-    simulated_human_agent = SimulatedHumanAgent(name="SimulatedHuman", model=model, side_info="The capital of France is Paris.")
-    simulated_human_agent.review_plan(task="What is the capital of France?", plan="Search the internet for the capital of France.", side_info=simulated_human_agent.side_info)
+    user_id = "7f0c8207-6a6f-49cd-9d7e-17987cfafcb9"
+    user_products = load_behavior_info(user_id)
+    simulated_human_agent = SimulatedHumanAgent(name="Simulated Human", model=model, user_products=user_products)
+    set_simulated_human_agent(simulated_human_agent)
+    print(ask_human_expert_for_help(question="What does the human like?", context=""))

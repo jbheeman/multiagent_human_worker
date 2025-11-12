@@ -23,7 +23,7 @@ import yaml
 from websurfer_agent.web_surfer_tool import WebSurferTool
 from common_tools.llm_chat_tool import create_llm_chat_tool
 from common_tools.logger import Logger
-from common_tools.sideinformation import load_side_info_for_user
+
 
 # Planner and state manager
 from planning_agent.planning_agent import PlanningAgent
@@ -32,6 +32,7 @@ from critique_agent.critique_agent import PostExecutionCritiqueAgent, PreExecuti
 
 #Expert agent
 from simulated_humans.simulated_human import SimulatedHumanAgent, ask_human_expert_for_help, set_simulated_human_agent
+from simulated_humans.sideinformation import load_behavior_info
 
 def run_orchestrator_task(user_goal, user_id, side_info=None):
     """
@@ -92,8 +93,8 @@ def run_orchestrator_task(user_goal, user_id, side_info=None):
    
     llm_tool = create_llm_chat_tool(model=gemma_model)
     
-    persona_info = load_side_info_for_user(user_id)
-    simulated_human_agent = SimulatedHumanAgent(name="SimulatedHuman", model=planning_model, side_info=persona_info, prompt_templates=simulated_human_prompt_templates)
+    user_products = load_behavior_info(user_id)
+    simulated_human_agent = SimulatedHumanAgent(name="SimulatedHuman", model=planning_model, user_products=user_products)
     set_simulated_human_agent(simulated_human_agent)
 
     manager_agent = ToolCallingAgent(

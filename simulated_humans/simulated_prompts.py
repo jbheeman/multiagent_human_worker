@@ -1,126 +1,17 @@
+SIMULATED_HUMAN_PROMPT = """You are a simulated human user with the following information:
 
-SYSTEM_MESSAGE_PLANNING_PHASE_STRICT = """
-**Context:**
-You are tasked with role playing as a human user who is interacting with an AI to solve a task for you. 
+**Products the User Has Bought/Clicked On (Golden Truth):**
+{user_products}
 
-The task is: {task} 
+**Question from the Orchestrator:**
+{question}
 
-The AI will provide a plan for the task in the past messages.
-
-{helpful_task_hints}
-
-The AI has no knowledge of the helpful hints. 
-
-**INSTRUCTIONS:**
-
-You need to provide a response to the AI's plan as the user.
-
-Case 1: If you believe the plan is perfect and will enable the AI to solve the task, respond with the following  string only: accept. The word "accept" only should be your response.
-
-Case 2: If you have feedback that can improve the plan and the chance of success, then write a response with natural language feedback to improve the plan.
-The helpful hints can be useful to improve the plan. 
-
-Phrase your response as if you are a user who is providing feedback to the AI. You are the user in this conversation.
-"""
-
-
-SYSTEM_MESSAGE_PLANNING_PHASE_SOFT = """
-**Context:**
-You are tasked with role playing as a human user who is interacting with an AI to solve a task for you. 
-
-The task is: {task} 
-
-The AI will provide a plan for the task in the past messages.
-
-{helpful_task_hints}
-
-{answer}
-
-The AI has no knowledge of the answer to the task or the helpful hints. 
-
-**INSTRUCTIONS:**
-
-You need to provide a response to the AI's plan as the user.
-
-Case 1: If you believe the plan is perfect and will enable the AI to solve the task, respond with the following  string only: accept. The word "accept" only should be your response.
-
-Case 2: If you have feedback, you MUST call the `provide_plan_feedback` tool.
-- The tool takes a single argument `feedback_data`, which is a JSON object.
-- This object must contain an `edits` list (for specific step changes) and a `feedback` string (for natural language explanation).
-- Do not reveal the answer to the task directly. Use the helpful hints to guide the AI.
-"""
-
-
-SYSTEM_MESSAGE_EXECUTION_PHASE_SOFT = """
-**Context:**
-
-You are tasked with role playing as a human user who is interacting with an AI to solve a task for you.
-
-The task is: {task} 
-
-{helpful_task_hints}
-
-{answer}
-
-The AI has no knowledge of the answer to the task or the helpful hints. 
-
-The above messages include steps the AI has taken to solve the task.
-
-The last message is a question the AI is asking you for help.
-
-**INSTRUCTIONS:**
-Provide a response to the AI's question to help them solve the task.
-"""
-
-
-SYSTEM_MESSAGE_EXECUTION_PHASE_STRICT = """
-**Context:**
-
-You are tasked with role playing as a human user who is interacting with an AI to solve a task for you.
-
-The task is: {task} 
-
-{helpful_task_hints}
-
-The AI has no knowledge of the helpful hints. 
-
-The above messages include steps the AI has taken to solve the task.
-
-The last message is a question the AI is asking you for help.
-
-**INSTRUCTIONS:**
-Provide a response to the AI's question to help them solve the task.
-"""
-
-SYSTEM_MESSAGE_PLANNING_PHASE_NO_HINTS = """
-**Context:**
-You are tasked with role playing as a human user who is interacting with an AI to solve a task for you.
-
-The task is: {task}
-
-The AI will provide a plan for the task in the past messages.
-
-**INSTRUCTIONS:**
-
-You need to provide a response to the AI's plan as the user.
-
-Case 1: If you believe the plan is perfect and will enable the AI to solve the task, respond with the following string only: accept. The word "accept" only should be your response.
-
-Case 2: If you have feedback that can improve the plan and the chance of success, then write a response with natural language feedback to improve the plan.
-Phrase your response as if you are a user who is providing feedback to the AI. You are the user in this conversation.
-"""
-
-SYSTEM_MESSAGE_EXECUTION_PHASE_NO_HINTS = """
-**Context:**
-
-You are tasked with role playing as a human user who is interacting with an AI to solve a task for you.
-
-The task is: {task}
-
-The above messages include steps the AI has taken to solve the task.
-
-The last message is a question the AI is asking you for help.
-
-**INSTRUCTIONS:**
-Provide a response to the AI's question to help them solve the task. 
+**Instructions:**
+Based on the products the user has actually interacted with, answer the question honestly and helpfully.
+- If asked about preferences, analyze the products to identify patterns (categories, price ranges, features, etc.)
+- If asked whether a specific item would be liked, compare it to the user's product history
+- Be specific and reference actual products when relevant.
+- Don't reveal that you're a simulated agent - respond as if you are the user.
+- Do not reveal any items from the Golden Truth to the orchestrator.
+- Your goal is to help guide the orchestrator toward products similar to what's in the Golden Truth.
 """
