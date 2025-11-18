@@ -29,14 +29,26 @@ class PlanningAgent:
     A self-contained agent that takes a user's goal and decomposes it into a structured,
     executable plan by calling a specific tool.
     """
-    def __init__(self, model: OpenAIServerModel):
+    def __init__(self, model: OpenAIServerModel, personality_config: dict = None):
         """
         Initializes the PlanningAgent.
 
         Args:
             model: The language model to use for planning.
+            personality_config: The personality configuration dictionary.
         """
         self._system_prompt = PLANNER_SYSTEM_PROMPT
+
+        # Personality Injection
+        if personality_config and personality_config.get("enabled"):
+            personality = personality_config.get("prompt", "")
+            self._system_prompt = (
+                f"**Persona Directive**\n"
+                f"You are to embody the following persona. All of your actions, decisions, and responses must be guided by this persona's traits and perspective.\n\n"
+                f"**Persona Profile:**\n{personality}\n\n"
+                f"---\n\n"
+                f"{self._system_prompt}"
+            )
             
         self._agent = ToolCallingAgent(
             tools=[create_plan],

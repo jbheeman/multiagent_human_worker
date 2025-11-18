@@ -95,6 +95,7 @@ class WebSurferAgent:
         model_context_token_limit: Optional[int] = None,
         system_prompt: Optional[str] = None,
         prompt_templates: Optional[Dict] = None,
+        personality_config: Optional[Dict] = None,
     ) -> None:
         """Initialize the WebSurfer."""
         self.name = name
@@ -115,6 +116,7 @@ class WebSurferAgent:
         self.use_action_guard = use_action_guard
         self.search_engine = search_engine
         self.model_context_token_limit = model_context_token_limit
+        self.personality_config = personality_config
 
         if debug_dir is None and to_save_screenshots:
             raise ValueError(
@@ -442,6 +444,18 @@ class WebSurferAgent:
             # Similar to how FileSurfer does it
             date_today = datetime.now().strftime("%B %d, %Y")
             system_prompt = WEB_SURFER_SYSTEM_MESSAGE.format(date_today=date_today)
+
+            # Personality Injection
+            if self.personality_config and self.personality_config.get("enabled"):
+                personality = self.personality_config.get("prompt", "")
+                # Prepend the personality directive to the agent's base system prompt
+                system_prompt = (
+                    f"**Persona Directive**\n"
+                    f"You are to embody the following persona. All of your actions, decisions, and responses must be guided by this persona's traits and perspective.\n\n"
+                    f"**Persona Profile:**\n{personality}\n\n"
+                    f"---\n\n"
+                    f"{system_prompt}" # The original system prompt follows the persona block
+                )
             
             initial_context = (
                 f"{system_prompt}\n\n"

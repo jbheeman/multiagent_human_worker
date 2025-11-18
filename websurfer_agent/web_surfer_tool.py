@@ -42,15 +42,17 @@ class WebSurferTool(Tool):
     }
     output_type = "string"
     
-    def __init__(self, model: Optional[OpenAIServerModel] = None, **kwargs):
+    def __init__(self, model: Optional[OpenAIServerModel] = None, personality_config: Optional[Dict] = None, **kwargs):
         """Initialize the WebSurferTool.
         
         Args:
             model: The OpenAIServerModel to use for the WebSurferAgent
+            personality_config: The personality configuration dictionary
             **kwargs: Additional arguments to pass to WebSurferAgent
         """
         super().__init__()
         self.model = model
+        self.personality_config = personality_config
         self.agent_kwargs = kwargs
         self._agent = None
         self._loop = None
@@ -72,6 +74,7 @@ class WebSurferTool(Tool):
         if self._agent is None:
             self._agent = WebSurferAgent(
                 model=self.model,
+                personality_config=self.personality_config,
                 **self.agent_kwargs
             )
         return self._agent
