@@ -1,6 +1,6 @@
 """WebSurfer Tool wrapper for smolagents orchestrator."""
 import asyncio
-from typing import Optional
+from typing import Optional, Dict
 from smolagents import Tool
 from smolagents.models import OpenAIServerModel
 

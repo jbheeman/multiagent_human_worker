@@ -1,6 +1,6 @@
 from smolagents import ToolCallingAgent, OpenAIServerModel, tool
-from knowledge_base.models import KnowledgeBase, ProductKnowledge, RefinementDecision, PurchasedProduct
-from typing import List, Dict, Optional
+from knowledge_base.models import KnowledgeBase, ProductKnowledge, RefinementDecision, PurchasedProduct, UserProducts
+from typing import List, Dict, Optional, Any
 import json
 import re
 from common_tools.logger import Logger
@@ -23,11 +23,14 @@ class PersonaAgent:
     The 'brain' of the system, responsible for analyzing information and guiding the search
     based on a specific persona.
     """
-    def __init__(self, model: OpenAIServerModel, user_products: Dict[str, PurchasedProduct], logger: Optional[Logger] = None):
+    def __init__(self, model: OpenAIServerModel, user_products: Dict[str, PurchasedProduct], logger: Optional[Logger] = None, persona: str = None):
         self.model = model
         self.logger = logger if logger else Logger()
         self.user_products = user_products
-        self.personality_prompt = self.infer_persona_from_products(user_products)
+        if persona:
+            self.personality_prompt = persona
+        else:
+            self.personality_prompt = self.infer_persona_from_products(user_products)
 
         # This internal agent is specialized for making the strategic refinement decision.
         self._refinement_agent = ToolCallingAgent(
@@ -85,27 +88,21 @@ class PersonaAgent:
         
         self.logger.log_overview("--- PersonaAgent: Inferring persona from prior purchases ---")
         
-        # Log detailed prompt and output to a separate file
-        inference_log_file = self.logger.get_log_file("PersonaInference")
-        inference_log_file.write("--- Persona Inference Prompt ---\n")
-        inference_log_file.write(prompt + "\n")
-        inference_log_file.write("---------------------------------\n\n")
+        # Log detailed prompt and output to the goal-specific overview.log, but not stdout
+        self.logger.log_overview(f"--- Persona Inference Prompt ---\n{prompt}\n---------------------------------\n\n")
         
         response_message = self.model([{"role": "user", "content": prompt}])
         full_output = response_message.content
         
-        inference_log_file.write("--- LLM Full Output ---\n")
-        inference_log_file.write(full_output + "\n")
-        inference_log_file.write("-----------------------\n")
-        inference_log_file.close()
+        self.logger.log_overview(f"--- LLM Full Output ---\n{full_output}\n-----------------------\n")
 
         match = re.search(r"<persona_description>(.*?)</persona_description>", full_output, re.DOTALL)
         if match:
             persona_description = match.group(1).strip()
-            self.logger.log_overview(f"Inferred Persona: {persona_description}")
+            self.logger.log_overview(f"Inferred Persona: {persona_description}", to_stdout=True)
             return persona_description
         else:
-            self.logger.log_overview("ERROR: Could not extract persona description from LLM output. Using full output as fallback.")
+            self.logger.log_overview("ERROR: Could not extract persona description from LLM output. Using full output as fallback.", to_stdout=True)
             # Fallback to using the full output if tags are not found
             return full_output
 
@@ -359,14 +356,14 @@ class PersonaAgent:
             status="ready_to_choose"
         )
 
-    def choose(self, knowledge_base: KnowledgeBase) -> str:
+    def choose(self, knowledge_base: KnowledgeBase, top_k: int = 1) -> tuple[str, str]:
         """
         Makes the final choice from the list of finalist products in the KnowledgeBase.
         """
         finalists = {name: product for name, product in knowledge_base.products.items() if product.status == 'researching'}
 
         if not finalists:
-            return "No viable options were left to make a choice. The research may have been inconclusive or all options were pruned."
+            return "No viable options were left to make a choice. The research may have been inconclusive or all options were pruned.", ""
 
         finalist_summary = ""
         for name, product in finalists.items():
@@ -378,131 +375,147 @@ class PersonaAgent:
                 f"- **Cons:**\n{cons_str}\n\n"
             )
 
-        prompt = self.get_full_persona_prompt(
-            f"""
-            **Objective:** Make a final decision.
+        if top_k == 1:
+            prompt = self.get_full_persona_prompt(
+                f"""
+                **Objective:** Make a final decision.
 
-            **Finalist Products:**
-            ---
-            {finalist_summary}
-            ---
+                **Finalist Products:**
+                ---
+                {finalist_summary}
+                ---
 
-            **Your Task:**
-            Based on your persona and the pros and cons of each finalist, choose the single best product.
-            Your answer should be a single sentence stating your choice, followed by a brief justification.
+                **Your Task:**
+                Based on your persona and the pros and cons of each finalist, choose the single best product.
+                Your answer should be a single sentence stating your choice, followed by a brief justification.
 
-            Example: "I choose the Framework Laptop 13 because its focus on repairability and recycled materials aligns perfectly with my values, despite the average battery life."
-            """
-        )
+                Example: "I choose the Framework Laptop 13 because its focus on repairability and recycled materials aligns perfectly with my values, despite the average battery life."
+                """
+            )
+        else:
+            prompt = self.get_full_persona_prompt(
+                f"""
+                **Objective:** Select the top {top_k} recommendations.
+
+                **Finalist Products:**
+                ---
+                {finalist_summary}
+                ---
+
+                **Your Task:**
+                Based on your persona and the pros and cons of each finalist, choose the top {top_k} best products.
+                Return ONLY a JSON list of strings, where each string is the name of a chosen product.
+
+                Example:
+                ```json
+                ["Product A", "Product B", "Product C"]
+                ```
+                """
+            )
 
         # Use the base model for a direct chat completion call
         final_choice_message = self.model([{"role": "user", "content": prompt}])
         final_choice = final_choice_message.content
         self.logger.log_overview(f"🧠 PersonaAgent: Made final choice: {final_choice}")
-        return final_choice
+        return final_choice, prompt
 
-        def answer_question(self, question: str, context: str, knowledge_base: KnowledgeBase, last_decision: Optional[RefinementDecision]) -> str:
+    def generate_goals(self, n: int = 33) -> List[str]:
+        """
+        Generates n distinct, likely shopping goals for the user based on their persona and history.
+        """
+        from common_tools.goal_generator import GoalGenerator
+        # Re-use the logic we put in GoalGenerator, but invoked from here if needed
+        # Or implement directly. Since we created GoalGenerator as a separate tool, 
+        # we can instantiate it here or just duplicate the logic to keep PersonaAgent self-contained.
+        # Let's use the GoalGenerator class to keep it clean.
+        generator = GoalGenerator(self.model)
+        # We need to wrap the user_products dict into a UserProducts object if it isn't one
+        # In PersonaAgent, self.user_products is a Dict[str, PurchasedProduct]
+        # GoalGenerator expects UserProducts object
+        user_products_obj = UserProducts(products=self.user_products)
+        return generator.generate_goals(user_products_obj, self.personality_prompt, n)
 
+    def critique_task(self, user_goal: str, final_answer: str, ground_truth: Dict[str, Any]) -> float:
+        """
+        Critiques the final answer against the ground truth.
+        Returns a reward of 1.0 if the answer contains the exact ground truth item, 0.0 otherwise.
+        """
+        ground_truth_title = ground_truth.get("title", "").lower()
+        ground_truth_asin = ground_truth.get("asin", "").lower()
+        
+        final_answer_lower = final_answer.lower()
+        
+        # Strict check: does the final answer contain the exact title or ASIN?
+        # We might need a slightly fuzzy check for title if the model shortens it, 
+        # but the user requested "exactly right". 
+        # Let's assume "exactly right" means the core product identity is correct.
+        
+        if ground_truth_asin and ground_truth_asin in final_answer_lower:
+            self.logger.log_overview(f"⚖️ Critique: Exact match found by ASIN ({ground_truth_asin}). Reward: 1.0")
+            return 1.0
+            
+        if ground_truth_title and ground_truth_title in final_answer_lower:
+            self.logger.log_overview(f"⚖️ Critique: Exact match found by Title. Reward: 1.0")
+            return 1.0
+            
+        # If strict string matching fails, we could ask the LLM to verify identity, 
+        # but for "strict exact match" requested by user, string inclusion of the full title/ID is safest.
+        
+        self.logger.log_overview(f"⚖️ Critique: No exact match found. Reward: 0.0")
+        return 0.0
+
+    def answer_question(self, question: str, context: str, knowledge_base: KnowledgeBase, last_decision: Optional[RefinementDecision]) -> str:
+        """
+        Answers a question from the manager agent's perspective, based on the persona.
+        """
+        kb_summary_parts = []
+        for name, product in knowledge_base.products.items():
+            product_detail = f"  - **Product:** {name}\n"
+            if product.pros:
+                product_detail += "    - **Pros:**\n" + "\n".join(f"      - {p}" for p in product.pros) + "\n"
+            if product.cons:
+                product_detail += "    - **Cons:**\n" + "\n".join(f"      - {c}" for c in product.cons) + "\n"
+            if product.info:
+                product_detail += "    - **Info:**\n" + "\n".join(f"      - {i}" for i in product.info) + "\n"
+            kb_summary_parts.append(product_detail)
+
+        kb_summary = "\n".join(kb_summary_parts)
+        if not kb_summary:
+            kb_summary = "No products in the knowledge base yet."
+
+        last_decision_summary = "No previous decision."
+        if last_decision:
+            last_decision_summary = f"""
+            - **Previous Thought:** {last_decision.thought}
+            - **Previous Task:** {last_decision.next_research_task}
             """
 
-            Answers a question from the manager agent's perspective, based on the persona.
+        prompt = self.get_full_persona_prompt(
+            f"""
+            **Objective:** Answer a clarifying question from your research assistant.
 
+            **Full Knowledge Base:**
+            {kb_summary}
+
+            **Your Last Decision:**
+            {last_decision_summary}
+
+            **Assistant's Current Context:**
+            ---
+            {context}
+            ---
+
+            **Assistant's Question:** "{question}"
+
+            **Your Task:**
+            Based on your persona, the full knowledge base, your last decision, and the assistant's context and question, provide a clear and concise answer.
             """
+        )
 
-            kb_summary_parts = []
-
-            for name, product in knowledge_base.products.items():
-
-                product_detail = f"  - **Product:** {name}\n"
-
-                if product.pros:
-
-                    product_detail += "    - **Pros:**\n" + "\n".join(f"      - {p}" for p in product.pros) + "\n"
-
-                if product.cons:
-
-                    product_detail += "    - **Cons:**\n" + "\n".join(f"      - {c}" for c in product.cons) + "\n"
-
-                if product.info:
-
-                    product_detail += "    - **Info:**\n" + "\n".join(f"      - {i}" for i in product.info) + "\n"
-
-                kb_summary_parts.append(product_detail)
-
-    
-
-            kb_summary = "\n".join(kb_summary_parts)
-
-            if not kb_summary:
-
-                kb_summary = "No products in the knowledge base yet."
-
-    
-
-            last_decision_summary = "No previous decision."
-
-            if last_decision:
-
-                last_decision_summary = f"""
-
-                - **Previous Thought:** {last_decision.thought}
-
-                - **Previous Task:** {last_decision.next_research_task}
-
-                """
-
-    
-
-            prompt = self.get_full_persona_prompt(
-
-                f"""
-
-                **Objective:** Answer a clarifying question from your research assistant.
-
-    
-
-                **Full Knowledge Base:**
-
-                {kb_summary}
-
-    
-
-                **Your Last Decision:**
-
-                {last_decision_summary}
-
-    
-
-                **Assistant's Current Context:**
-
-                ---
-
-                {context}
-
-                ---
-
-    
-
-                **Assistant's Question:** "{question}"
-
-    
-
-                **Your Task:**
-
-                Based on your persona, the full knowledge base, your last decision, and the assistant's context and question, provide a clear and concise answer.
-
-                """
-
-            )
-
-            self.logger.log_overview("--- Persona Agent: Answering Question ---")
-
-            self.logger.log_overview(prompt)
-
-            self.logger.log_overview("-----------------------------------------")
-
-            response_message = self.model([{"role": "user", "content": prompt}])
-
-            return response_message.content
+        self.logger.log_overview("--- Persona Agent: Answering Question ---")
+        self.logger.log_overview(prompt)
+        self.logger.log_overview("-----------------------------------------")
+        response_message = self.model([{"role": "user", "content": prompt}])
+        return response_message.content
 
     

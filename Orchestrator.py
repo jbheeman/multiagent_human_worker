@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import shutil
 import asyncio
+from datetime import datetime
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -20,6 +21,9 @@ from smolagents import (
 
 import yaml
 
+# Create a lock to manage access to stdout redirection
+stdout_lock = asyncio.Lock()
+
 
 # Tools
 from websurfer_agent.web_surfer_tool import WebSurferTool
@@ -33,18 +37,34 @@ from knowledge_base.models import KnowledgeBase, ProductKnowledge, PurchasedProd
 from persona_agent.persona_agent import PersonaAgent
 
 
-async def run_orchestrator_task(user_goal, max_refinement_loops: int = 3):
+async def run_orchestrator_task(user_goal, max_refinement_loops: int = 3, products_list: dict = None, top_k: int = 1, task_id: str = None, persona: str = None, logger: Logger = None):
     """
     Run the orchestrator task with a given user goal and optional side information.
     
     Args:
         user_goal (str): The user's goal/question to solve
         max_refinement_loops (int): The maximum number of refinement loops to perform.
+        products_list (dict): Optional dictionary of products to use instead of the hardcoded default.
+        top_k (int): The number of top recommendations to return.
+        task_id (str): Optional unique identifier for the task (used for logging).
+        persona (str): Optional persona string to use instead of inferring it.
+        logger (Logger): Optional logger instance. If not provided, a default one will be created.
     
     Returns:
-        The final answer from the PersonaAgent.
+        The final answer from the PersonaAgent (string or list of strings).
     """
-    user_products_json = """
+    if logger is None:
+        # Create a default logger if none is provided
+        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        run_dir = f"logs/run_{timestamp}"
+        if task_id:
+            run_dir += f"_{task_id}"
+        logger = Logger(run_dir=run_dir, goal_id=task_id)
+
+    if products_list:
+        user_products_data = products_list
+    else:
+        user_products_json = """
 {
     "B0DBZ3JYRF": {
         "title": "Airkeep Car Air Freshener - White Jasmine Handmade Scented Ceramic for Drawers and Closets, Car Air Freshener Gifts for Men Women Car Fragrance",
@@ -163,22 +183,20 @@ async def run_orchestrator_task(user_goal, max_refinement_loops: int = 3):
     }
 }
     """
-    user_products_data = json.loads(user_products_json)
+        user_products_data = json.loads(user_products_json)
     user_products = {asin: PurchasedProduct(**data) for asin, data in user_products_data.items() if data.get("asin")}
 
-    logger = Logger()
     logger.log_overview(f"--- 🚀 Initializing Orchestrator with Dynamic Task Loop ---")
     logger.log_overview(f"Logs for this run will be saved in: {logger.run_dir}")
 
-    # Create a workspace directory for this run inside the logs directory
-    work_dir = os.path.abspath(os.path.join(logger.run_dir, "workspace"))
+    work_dir = logger.run_dir + "/workspace"
     os.makedirs(work_dir, exist_ok=True)
     workspace_source_dir = "workspace"
     if not os.path.exists(workspace_source_dir):
         os.makedirs(workspace_source_dir)
     if os.path.exists(workspace_source_dir):
         shutil.copytree(workspace_source_dir, work_dir, dirs_exist_ok=True)
-    logger.log_overview(f"Working directory for this run: {work_dir}")
+    logger.log_overview(f"Working directory for this run: {work_dir}\n")
 
     orchestrator_prompt = yaml.safe_load(open("orchestrator_agent.yaml").read())
 
@@ -201,7 +219,7 @@ async def run_orchestrator_task(user_goal, max_refinement_loops: int = 3):
     llm_tool = create_llm_chat_tool(model=gemma_model)
 
     # 3. Initialize Agents and KnowledgeBase
-    persona_agent = PersonaAgent(model=gemma_model, user_products=user_products, logger=logger)
+    persona_agent = PersonaAgent(model=gemma_model, user_products=user_products, logger=logger, persona=persona)
     knowledge_base = KnowledgeBase()
     
     # The ManagerAgent is now stateless and created per-loop, but we define its instructions here
@@ -216,7 +234,6 @@ async def run_orchestrator_task(user_goal, max_refinement_loops: int = 3):
     )
 
     # --- Start of the Dynamic Task Loop ---
-    logger.log_overview(f"\n🎯 User Goal: {user_goal}")
 
     # Formulate the initial research task using the PersonaAgent
     initial_chat_message = await asyncio.to_thread(persona_agent.initial_task, user_goal)
@@ -224,46 +241,49 @@ async def run_orchestrator_task(user_goal, max_refinement_loops: int = 3):
     last_refinement_decision = None
     
     for i in range(max_refinement_loops):
-        logger.log_overview("\n" + "=" * 50)
+        logger.log_overview(f"==================================================")
         logger.log_overview(f"▶️ Starting Refinement Loop {i+1}/{max_refinement_loops}")
         logger.log_overview(f"🔎 Current Research Task: {current_research_task}")
-        logger.log_overview("=" * 50)
+        logger.log_overview(f"==================================================\n")
 
         # 1. MANAGER ACTION
-        # Define the tool to ask the persona agent questions for this loop iteration
-        @tool
-        def ask_persona_agent(question: str, context: str = "") -> str:
-            """
-            Ask a clarifying question to the persona agent to get more information or guidance on the task.
-
-            Args:
-                question: The specific question to ask the persona agent.
-                context: You must explicitly pass any relevant information, such as the output of your previous
-                         tool calls, in this parameter. The persona agent does not have access to your history.
-            """
-            logger.log_overview("--- Manager Agent asking Persona Agent ---")
-            logger.log_overview(f"Question: {question}")
-            logger.log_overview(f"Context: {context}")
-            logger.log_overview("-----------------------------------------")
+        async with stdout_lock:
+            log_file = logger.get_log_file(f"ManagerAgent_Loop{i+1}")
             
-            # Also write to the manager's specific log file
-            print(f"Question to PersonaAgent:\n{question}\nContext:\n{context}", file=log_file)
-            
-            return persona_agent.answer_question(question, context, knowledge_base, last_refinement_decision)
+            # Define the tool to ask the persona agent questions for this loop iteration
+            @tool
+            def ask_persona_agent(question: str, context: str = "") -> str:
+                """
+                Ask a clarifying question to the persona agent to get more information or guidance on the task.
 
-        manager_agent = ToolCallingAgent(
-            tools=[llm_tool, WebSearchTool(), WikipediaSearchTool(), read_links, ask_persona_agent],
-            model=gemma_model,
-            instructions=manager_instructions,
-        )
-        log_file = logger.get_log_file(f"ManagerAgent_Loop{i+1}")
-        old_stdout = sys.stdout
-        sys.stdout = log_file
-        # Run synchronous manager agent in a separate thread to not block the event loop
-        manager_result = await asyncio.to_thread(manager_agent.run, current_research_task)
-        sys.stdout = old_stdout
-        log_file.close()
-        logger.log_overview(f"📝 Manager Result: {str(manager_result)[:500]}...")
+                Args:
+                    question: The specific question to ask the persona agent.
+                    context: You must explicitly pass any relevant information, such as the output of your previous
+                             tool calls, in this parameter. The persona agent does not have access to your history.
+                """
+                logger.log_overview("--- Manager Agent asking Persona Agent ---", to_stdout=True)
+                logger.log_overview(f"Question: {question}", to_stdout=True)
+                logger.log_overview(f"Context: {context}", to_stdout=True)
+                logger.log_overview("-----------------------------------------\n", to_stdout=True)
+                
+                # Also write to the manager's specific log file
+                print(f"Question to PersonaAgent:\n{question}\nContext:\n{context}", file=log_file)
+                
+                return persona_agent.answer_question(question, context, knowledge_base, last_refinement_decision)
+
+            manager_agent = ToolCallingAgent(
+                tools=[llm_tool, WebSearchTool(), WikipediaSearchTool(), read_links, ask_persona_agent],
+                model=gemma_model,
+                instructions=manager_instructions,
+            )
+            
+            # Run synchronous manager agent in a separate thread to not block the event loop
+            old_stdout = sys.stdout
+            sys.stdout = log_file
+            manager_result = await asyncio.to_thread(manager_agent.run, current_research_task)
+            sys.stdout = old_stdout
+            log_file.close()
+        logger.log_overview(f"📝 Manager Result: {str(manager_result)[:500]}...\n")
 
         # 2. KNOWLEDGE EXTRACTION
         logger.log_overview("🧠 PersonaAgent: Identifying products from manager results...")
@@ -276,7 +296,7 @@ async def run_orchestrator_task(user_goal, max_refinement_loops: int = 3):
                 newly_added_products.append(name)
         
         if newly_added_products:
-            logger.log_overview(f"➕ Added new products to KnowledgeBase: {newly_added_products}")
+            logger.log_overview(f"➕ Added new products to KnowledgeBase: {newly_added_products}\n")
 
         # Concurrently update knowledge for all identified products
         update_tasks = []
@@ -293,13 +313,14 @@ async def run_orchestrator_task(user_goal, max_refinement_loops: int = 3):
         # The `update_knowledge` method modifies the objects in-place, so no further action is needed here.
         
         # 3. STRATEGIC DIRECTION
-        log_file = logger.get_log_file(f"PersonaAgent_Refine_Loop{i+1}")
-        old_stdout = sys.stdout
-        sys.stdout = log_file
-        refinement_decision = persona_agent.refine(knowledge_base, user_goal, last_decision=last_refinement_decision)
-        sys.stdout = old_stdout
-        log_file.close()
-        logger.log_overview(f"🤔 Persona Refinement Decision: {refinement_decision.thought}")
+        async with stdout_lock:
+            log_file = logger.get_log_file(f"PersonaAgent_Refine_Loop{i+1}")
+            old_stdout = sys.stdout
+            sys.stdout = log_file
+            refinement_decision = persona_agent.refine(knowledge_base, user_goal, last_decision=last_refinement_decision)
+            sys.stdout = old_stdout
+            log_file.close()
+        logger.log_overview(f"🤔 Persona Refinement Decision: {refinement_decision.thought}\n", to_stdout=True)
 
         # 4. STATE UPDATE
         last_refinement_decision = refinement_decision
@@ -308,27 +329,33 @@ async def run_orchestrator_task(user_goal, max_refinement_loops: int = 3):
             for option_name in refinement_decision.options_to_prune:
                 if option_name in knowledge_base.products:
                     knowledge_base.products[option_name].status = "pruned"
-                    logger.log_overview(f"✂️ Pruned option: {option_name}")
-
-        # 5. LOOP OR EXIT
-        if refinement_decision.status == "ready_to_choose":
-            logger.log_overview("✅ Persona is ready to choose. Exiting refinement loop.")
-            break
+                    logger.log_overview(f"✂️ Pruned option: {option_name}\n")
         
-        current_research_task = refinement_decision.next_research_task
+        if refinement_decision.status == "ready_to_choose":
+            logger.log_overview(f"✅ Persona decided to STOP research.\n", to_stdout=True)
+            break
+        else:
+            current_research_task = refinement_decision.next_research_task
+            logger.log_overview(f"🔄 Persona decided to CONTINUE research with new task: {current_research_task}\n", to_stdout=True)
 
     # --- Final Decision Phase ---
-    logger.log_overview("\n--- 🏆 Final Decision Phase ---")
+    logger.log_overview(f"DEBUG: Knowledge base before choose: {knowledge_base.products}")
+    logger.log_overview("--- 🏆 Final Decision Phase ---\n")
     
+    final_answer, choose_prompt = persona_agent.choose(knowledge_base, top_k=top_k)
+    
+    # Log the prompt and final answer to the specific log file
     log_file = logger.get_log_file("PersonaAgent_Choose")
-    old_stdout = sys.stdout
-    sys.stdout = log_file
-    final_answer = persona_agent.choose(knowledge_base)
-    sys.stdout = old_stdout
+    log_file.write("--- PersonaAgent Choose Prompt ---\n")
+    log_file.write(choose_prompt + "\n")
+    log_file.write("-------------------------------------\n\n")
+    log_file.write("--- PersonaAgent Final Answer ---\n")
+    log_file.write(final_answer + "\n")
+    log_file.write("-----------------------------------\n")
     log_file.close()
     
-    logger.log_overview("\n" + "="*50)
-    logger.log_overview(f"🎉 Final Answer: {final_answer}")
+    logger.log_overview("="*50)
+    logger.log_overview(f"🎉 Final Answer: {final_answer}", to_stdout=True)
     logger.log_overview("="*50)
     
     return final_answer
