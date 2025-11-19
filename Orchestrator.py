@@ -2,7 +2,6 @@ import os
 import json
 from pathlib import Path
 import sys
-import tempfile
 import shutil
 import asyncio
 
@@ -24,28 +23,22 @@ import yaml
 
 # Tools
 from websurfer_agent.web_surfer_tool import WebSurferTool
+from file_surfer_agent.file_surfer_tool import FileSurferTool
+from coder_agent.coder_tool import CoderTool
 from common_tools.llm_chat_tool import create_llm_chat_tool
 from common_tools.logger import Logger
 from common_tools.read_links_tool import read_links
-from common_tools.sideinformation import get_side_info
-from common_tools.sideinformation import load_side_info_from_metadata
-from common_tools.logger import Logger
 
 from knowledge_base.models import KnowledgeBase, ProductKnowledge, PurchasedProduct
 from persona_agent.persona_agent import PersonaAgent
 
 
-#Expert agent
-from simulated_humans.simulated_human import SimulatedHumanAgent, ask_human_expert_for_help, set_simulated_human_agent
-from simulated_humans.sideinformation import load_behavior_info
-
-async def run_orchestrator_task(user_goal, side_info=None, max_refinement_loops: int = 3):
+async def run_orchestrator_task(user_goal, max_refinement_loops: int = 3):
     """
     Run the orchestrator task with a given user goal and optional side information.
     
     Args:
         user_goal (str): The user's goal/question to solve
-        side_info (dict, optional): Side information to help with the task
         max_refinement_loops (int): The maximum number of refinement loops to perform.
     
     Returns:
@@ -188,9 +181,6 @@ async def run_orchestrator_task(user_goal, side_info=None, max_refinement_loops:
     logger.log_overview(f"Working directory for this run: {work_dir}")
 
     orchestrator_prompt = yaml.safe_load(open("orchestrator_agent.yaml").read())
-   
-    simulated_human_prompt_template = yaml.safe_load(open("simulated_human_coworker.yaml").read())
-    simulated_human_prompt_templates = simulated_human_prompt_template
 
     # 1. Define models for different roles
     gemma_model = OpenAIServerModel(
@@ -205,7 +195,7 @@ async def run_orchestrator_task(user_goal, side_info=None, max_refinement_loops:
     )
 
     # 2. Initialize Tools
-    # web_surfer_tool = WebSurferTool(model=gemma_model, personality_config=PERSONALITY_CONFIG)
+    web_surfer_tool = WebSurferTool(model=gemma_model)
     file_surfer_tool = FileSurferTool(model=gemma_model, base_path=work_dir)
     coder_tool = CoderTool(model=gemma_model, work_dir=Path(work_dir))
     llm_tool = create_llm_chat_tool(model=gemma_model)
@@ -262,7 +252,7 @@ async def run_orchestrator_task(user_goal, side_info=None, max_refinement_loops:
             return persona_agent.answer_question(question, context, knowledge_base, last_refinement_decision)
 
         manager_agent = ToolCallingAgent(
-            tools=[file_surfer_tool, coder_tool, llm_tool, WebSearchTool(), WikipediaSearchTool(), read_links, ask_persona_agent],
+            tools=[llm_tool, WebSearchTool(), WikipediaSearchTool(), read_links, ask_persona_agent],
             model=gemma_model,
             instructions=manager_instructions,
         )
