@@ -1,0 +1,415 @@
+# Copyright (c) 2025 Lakshya A Agrawal and the GEPA contributors
+# https://github.com/gepa-ai/gepa
+
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Generic, Protocol, TypeVar
+import json
+from gepa.core.adapter import GEPAAdapter, EvaluationBatch
+import gepa
+
+from smolagents.models import OpenAIServerModel
+import os
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
+
+
+class GEPACompatibleModel:
+    """Wrapper to make OpenAIServerModel compatible with GEPA's string-based calls."""
+    def __init__(self, model: OpenAIServerModel):
+        self.model = model
+    
+    def __call__(self, prompt: str | list, **kwargs):
+        """Handle both string prompts (from GEPA) and message lists (normal usage)."""
+        if isinstance(prompt, str):
+            # Convert string to message format for GEPA compatibility
+            messages = [{"role": "user", "content": prompt}]
+            response = self.model(messages, **kwargs)
+            # Return just the content as a string for GEPA
+            if hasattr(response, 'content'):
+                return response.content
+            elif isinstance(response, str):
+                return response
+            else:
+                return str(response)
+        else:
+            # Normal message list format
+            return self.model(prompt, **kwargs)
+    
+    def generate(self, *args, **kwargs):
+        """Delegate to wrapped model's generate method."""
+        return self.model.generate(*args, **kwargs)
+
+
+
+eval_model = SentenceTransformer("all-mpnet-base-v2")
+
+#This model generates the persona description
+persona_model = OpenAIServerModel(
+        model_id="gemma3",
+        api_base="https://ellm.nrp-nautilus.io/v1",
+        api_key=os.getenv("NAUT_API_KEY"),
+    )
+
+#This model evaluates the persona description   
+teacher_model_raw= OpenAIServerModel( # Still used for persona agent
+        model_id="qwen3",
+        api_base="https://ellm.nrp-nautilus.io/v1",
+        api_key=os.getenv("NAUT_API_KEY"),
+    )
+
+teacher_model = GEPACompatibleModel(teacher_model_raw)
+
+@dataclass
+class PersonaDataInst:
+    user_id: str
+    interactions: list[dict[str, Any]]  # your JSON: asin, title, price, options, etc.
+    gold_persona: str                # human-written shopping-preference text only
+
+@dataclass
+class PersonaTrajectory:
+    user_id: str
+    purchases_str: str
+    gold_persona: str
+    generated_persona: str
+    score: float
+    # you can add extra fields if you like, e.g. error messages
+
+
+
+RolloutOutput = TypeVar("RolloutOutput") # the generated persona description
+Trajectory = PersonaTrajectory
+DataInst = PersonaDataInst
+Candidate = dict[str, str]
+EvaluatorFn = Callable[[list[DataInst], Candidate], tuple[list[RolloutOutput], list[float]]] # the evaluator function
+
+
+BASE_PROMPT_STRING = """
+        Based on the following list of purchased products, please infer a persona for the user.
+
+        **Purchased Products:**
+        {product_list_str}
+
+        **Instructions:**
+        You must follow these steps and show your work for each one:
+        1.  **Extract Traits:** For each product, identify key traits (e.g., brand, category, price point, features, implied hobbies or interests).
+        2.  **Identify Buying Patterns:** Look for patterns across all products to determine the user's buying habits and preferences.
+        3.  **Categorize Traits:** Group the user's inferred buying traits into the following four categories:
+            - **Confident Likes:** Things we are confident the person likes.
+            - **Somewhat Confident Likes:** Things we are somewhat confident the person likes.
+            - **Confident Dislikes:** Things we are confident the person dislikes.
+            - **Somewhat Confident Dislikes:** Things we are somewhat confident the person dislikes.
+        4.  **Generate Persona Description:** Based on the categorized traits, write a concise, plaintext paragraph describing the user's persona. This description should be suitable for guiding a research assistant.
+        5. Do not infer demographic details (age, gender, location, education level, family status, etc.), unless they are explicitly stated in the product descriptions. Focus only on shopping behavior and preferences.
+
+        **Output Format:**
+        You must provide your full reasoning for steps 1-3. After your reasoning, provide the final persona description enclosed in `<persona_description>` tags.
+
+        **Example Output:**
+        **1. Extracted Traits:**
+        - Airkeep Car Air Freshener: Low price, home/car accessory, scent-focused.
+        - Lumiere & Co. Bike Seat Bag: Mid-range price, cycling accessory, practical.
+        ...
+
+        **2. Buying Patterns:**
+        - The user frequently buys cycling-related gear, suggesting a hobby in cycling.
+        - The user purchases items at various price points, but seems to value function over luxury.
+        ...
+
+        **3. Categorized Traits:**
+        - **Confident Likes:** Cycling, practical items.
+        - **Somewhat Confident Likes:** Home fragrance, pet safety.
+        ...
+
+        <persona_description>
+        The user is a practical, budget-conscious individual who prioritizes functionality and value. They are an avid cyclist, investing in quality components for their hobby. They are not brand-loyal but seem to prefer items with good reviews and a focus on durability. They show some interest in home and pet accessories, but are not driven by luxury or high-end brands.
+        </persona_description>
+        """
+# BASE_PROMPT_STRING = BASE_PROMPT_STRING.format(product_list_str=product_list_str)
+
+
+
+# base_candidate = {
+#     "persona_prompt": "Based on the items "  # your hand-written persona prompt
+# }
+
+def _build_product_list_str(interactions: list[dict[str, Any]], filter_type: str | list[str] | None = "purchase") -> str:
+    """
+    Build a string of products filtered by type.
+    
+    Args:
+        interactions: List of interaction dicts with 'type', 'title', 'price', etc.
+        filter_type: Type to filter by ("purchase", "cart", "click", or None for all)
+    """
+    if filter_type:
+        filtered = [item for item in interactions if item.get("type") == filter_type]
+    else:
+        filtered = interactions
+    
+    return "\n".join([f"- {item['title']} ({item.get('price', 'N/A')})" for item in filtered])
+
+
+def _score_persona(persona_description: str, gold_persona: str) -> float:
+    """
+    Score the persona description based on the gold persona.
+    """
+    #Do we use BERT or something? 
+    emb_pred = eval_model.encode(persona_description, normalize_embeddings=True)
+    emb_gold = eval_model.encode(gold_persona, normalize_embeddings=True)
+    sim = float(np.dot(emb_pred, emb_gold))  # cosine because normalized
+    # Map from [-1, 1] to [0, 1]
+    return (sim + 1.0) / 2.0
+
+
+
+def load_persona_dataset(path: str) -> list[PersonaDataInst]:
+    with open(path, "r") as f:
+        raw = json.load(f)
+    examples: list[PersonaDataInst] = []
+    for row in raw:
+        examples.append(
+            PersonaDataInst(
+                user_id=row["user_id"],
+                interactions=row["interactions"],
+                gold_persona=row["gold_persona"],
+            )
+        )
+    return examples
+@dataclass
+class EvaluationBatch[PersonaTrajectory, str]:
+    """
+    Container for the result of evaluating a proposed candidate on a batch of data.
+
+    - outputs: raw per-example outputs from upon executing the candidate. GEPA does not interpret these;
+      they are forwarded to other parts of the user's code or logging as-is.
+    - scores: per-example numeric scores (floats). GEPA sums these for minibatch acceptance
+      and averages them over the full validation set for tracking/pareto fronts.
+    - trajectories: optional per-example traces used by make_reflective_dataset to build
+      a reflective dataset (See `GEPAAdapter.make_reflective_dataset`). If capture_traces=True is passed to `evaluate`, trajectories
+      should be provided and align one-to-one with `outputs` and `scores`.
+    """
+
+    outputs: list[RolloutOutput]
+    scores: list[float]
+    trajectories: list[Trajectory] | None = None
+
+
+class ProposalFn(Protocol):
+    def __call__(
+        self,
+        candidate: dict[str, str],
+        reflective_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
+        components_to_update: list[str],
+    ) -> dict[str, str]:
+        """
+        - Given the current `candidate`, a reflective dataset (as returned by
+          `GEPAAdapter.make_reflective_dataset`), and a list of component names to update,
+          return a mapping component_name -> new component text (str). This allows the user
+          to implement their own instruction proposal logic. For example, the user can use
+          a different LLM, implement DSPy signatures, etc. Another example can be situations
+          where 2 or more components need to be updated together (coupled updates).
+
+        Returns
+        - Dict[str, str] mapping component names to newly proposed component texts.
+        """
+        ...
+
+class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
+    def _build_product_list_str(self, interactions: list[dict[str, Any]], filter_type: str | list[str] | None = "purchase") -> str:
+        """
+        Build a string of products filtered by type.
+        
+        Args:
+            interactions: List of interaction dicts with 'type', 'title', 'price', etc.
+            filter_type: Type(s) to filter by. Can be:
+                - A single string: "purchase", "cart", "click"
+                - A list of strings: ["purchase", "click"] to include multiple types
+                - None: include all interactions
+        """
+        if filter_type is None:
+            filtered = interactions
+        elif isinstance(filter_type, list):
+            # Multiple filter types - include items matching any of them
+            filtered = [item for item in interactions if item.get("type") in filter_type]
+        else:
+            # Single filter type (backward compatible)
+            filtered = [item for item in interactions if item.get("type") == filter_type]
+        
+        return "\n".join([f"- {item['title']} ({item.get('price', 'N/A')})" for item in filtered])
+
+
+    def _score_persona(self, persona_description: str, gold_persona: str) -> float:
+        """
+        Score the persona description based on the gold persona.
+        """
+        #Do we use BERT or something? 
+        emb_pred = eval_model.encode(persona_description, normalize_embeddings=True)
+        emb_gold = eval_model.encode(gold_persona, normalize_embeddings=True)
+        sim = float(np.dot(emb_pred, emb_gold))  # cosine because normalized
+        # Map from [-1, 1] to [0, 1]
+        return (sim + 1.0) / 2.0
+
+
+
+    def load_persona_dataset(self, path: str) -> list[PersonaDataInst]:
+        with open(path, "r") as f:
+            raw = json.load(f)
+        examples: list[PersonaDataInst] = []
+        for row in raw:
+            examples.append(
+                PersonaDataInst(
+                    user_id=row["user_id"],
+                    interactions=row["interactions"],
+                    gold_persona=row["gold_persona"],
+                )
+            )
+        return examples
+
+        
+    
+    
+    def evaluate(
+        self,
+        batch: list[PersonaDataInst],
+        candidate: dict[str, str],
+        capture_traces: bool = False,
+    ) -> EvaluationBatch[PersonaTrajectory, str]:
+        outputs: list[str] = []
+        scores: list[float] = []
+        trajectories: list[PersonaTrajectory] | None = [] if capture_traces else None
+
+        # use candidate["persona_prompt"], not hard-coded BASE_PROMPT_STRING
+        prompt_template = candidate["persona_prompt"]
+
+        for data_inst in batch:
+            try:
+                product_list_str = self._build_product_list_str(
+                    data_inst.interactions, None
+                )
+
+                prompt = prompt_template.format(product_list_str=product_list_str)
+                response_message = persona_model([{"role": "user", "content": prompt}])
+                raw_output = response_message.content or ""
+
+                # (optional) extract only <persona_description>...</persona_description>
+                persona_text = raw_output  # you can refine this later
+                if "<persona_description>" in persona_text and "</persona_description>" in persona_text:
+                    extracted_persona = persona_text.split("<persona_description>")[1].split("</persona_description>")[0].strip()
+                else:
+                    # Fallback: use the entire output if tags are missing
+                    extracted_persona = persona_text.strip()
+                    print(f"Warning: No <persona_description> tags found, using full output")
+
+
+                score = self._score_persona(extracted_persona, data_inst.gold_persona)
+
+
+            except Exception as e:
+                print(f"Error generating persona: {e}")
+                extracted_persona = ""
+                score = 0.0
+
+            outputs.append(extracted_persona)
+            scores.append(score)
+
+            if capture_traces:
+                product_list_str = self._build_product_list_str(
+                    data_inst.interactions, None
+                )
+                trajectories.append(
+                    PersonaTrajectory(
+                        user_id=data_inst.user_id,
+                        purchases_str=product_list_str,
+                        gold_persona=data_inst.gold_persona,
+                        generated_persona=extracted_persona,
+                        score=score,
+                    )
+                )
+
+        return EvaluationBatch(outputs=outputs, scores=scores, trajectories=trajectories)
+
+    def make_reflective_dataset(
+        self,
+        candidate: dict[str, str],
+        eval_batch: EvaluationBatch[PersonaTrajectory, str],
+        components_to_update: list[str],
+    ) -> Mapping[str, Sequence[Mapping[str, Any]]]:
+        datasets: dict[str, list[dict[str, Any]]] = {}
+
+        if "persona_prompt" not in components_to_update:
+            return datasets
+
+        trajectories = eval_batch.trajectories or []
+        records: list[dict[str, Any]] = []
+
+        sorted_trajs = sorted(trajectories, key=lambda t: t.score)
+        selected_trajs = sorted_trajs[: min(len(sorted_trajs), 16)]
+
+        for traj in selected_trajs:
+            feedback = (
+                f"Score: {traj.score:.3f}. "
+                "Improve alignment with the gold persona. "
+                "Avoid inferring demographics not supported by purchases. "
+                "Be explicit about shopping frequency, price sensitivity, main categories, "
+                "brand loyalty, and review usage when evidence exists."
+            )
+
+            rec = {
+                "Inputs": {
+                    "purchases": traj.purchases_str,
+                    "gold_persona": traj.gold_persona,
+                },
+                "Generated Outputs": traj.generated_persona,
+                "Feedback": feedback,
+                "score": traj.score,
+                "user_id": traj.user_id,
+            }
+            records.append(rec)
+
+        datasets["persona_prompt"] = records
+        return datasets
+
+    propose_new_texts: ProposalFn | None = None
+
+
+
+
+
+
+if __name__ == "__main__":
+    #test loading 1 user and their purchases
+    
+    
+    
+    base_candidate = {
+    "persona_prompt": BASE_PROMPT_STRING
+}
+
+
+  
+    trainset = load_persona_dataset("data/train.json")
+    valset   = load_persona_dataset("data/val.json")
+    adapter = PersonaGEPAAdapter()
+
+    gepa_result = gepa.optimize(
+    seed_candidate=base_candidate,
+    trainset=trainset,
+    valset=valset,
+    max_metric_calls=100, # <-- Set a budget
+    reflection_lm=teacher_model, # <-- Use a strong model to reflect on mistakes and propose better prompts
+    adapter=adapter,
+)
+
+    best = gepa_result.best_candidate
+    print("\n=== Best persona prompt ===")
+    print(best)
+
+    # batch = trainset[:2]
+    # eval_batch = adapter.evaluate(batch, base_candidate, capture_traces=True)
+    # print("Outputs:", eval_batch.outputs)
+    # print("Scores:", eval_batch.scores)
+    # print("First trajectory:", eval_batch.trajectories[0] if eval_batch.trajectories else None)
+
+    # print(f"Loaded {len(trainset)} examples")
+    
