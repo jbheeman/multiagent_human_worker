@@ -167,7 +167,7 @@ if __name__ == "__main__":
         api_base="https://ellm.nrp-nautilus.io/v1",
         api_key=os.getenv("NAUT_API_KEY"),
     )
-    for i in range(5):
+    for i in range(5, 7):
         test_instance = testset[i]
         if test_instance.interactions is None:
             print(f"Warning: test_instance.interactions is None for user {test_instance.user_id}")
