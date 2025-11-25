@@ -53,37 +53,6 @@ def save_user_json(user_id, persona_text, user_sessions, purchases_df, out_path=
 
     return out_path
 
-# --- CLI args (optional: allow overriding output path) ---
-parser = argparse.ArgumentParser(description="Create a JSON of user persona and purchases from OPeRA")
-parser.add_argument("--out", type=str, default=None, help="Output JSON file path")
-args = parser.parse_args()
-
-# --- Step 1: Load all 3 tables (from the FULL version) ---
-user_df = pd.read_parquet("hf://datasets/NEU-HAI/OPeRA/OPeRA_full/user/train/train.parquet")
-session_df = pd.read_parquet("hf://datasets/NEU-HAI/OPeRA/OPeRA_full/session/train/train.parquet")
-action_df = pd.read_parquet("hf://datasets/NEU-HAI/OPeRA/OPeRA_full/action/train/train.parquet")
-
-# --- Step 2: Pick one user (you can change this) ---
-user_id = user_df["user_id"].iloc[1]
-
-# --- Step 3: Display their persona summary ---
-persona_info = user_df.loc[user_df["user_id"] == user_id, "interview_transcript_processed"].values[0]
-print(f"\n🧠 Persona Summary for {user_id}:\n")
-print(persona_info)
-
-# --- Step 4: Get this user's sessions ---
-user_sessions = session_df[session_df["user_id"] == user_id]["session_id"].tolist()
-print(f"\n🛒 Found {len(user_sessions)} sessions for this user.\n")
-
-# --- Step 5: Filter actions belonging to those sessions ---
-user_actions = action_df[action_df["session_id"].isin(user_sessions)]
-
-# --- Step 6: Extract purchase clicks ---
-purchase_actions = user_actions[
-    (user_actions["action_type"] == "click") &
-    (user_actions["click_type"] == "purchase")
-].copy()
-
 # --- Step 7: Expand product JSONs ---
 def extract_products(row):
     """
@@ -102,6 +71,20 @@ def extract_products(row):
                 products.extend(products_data)
     except Exception:
         pass
+
+    if click_type == "cart_side_bar" and len(products) == 0:
+        try:
+            if pd.notna(row.get("page_meta")):
+                page_meta = json.loads(row["page_meta"]) if isinstance(row["page_meta"], str) else row["page_meta"]
+                if isinstance(page_meta, dict) and "cart_items" in page_meta:
+                    cart_items = page_meta["cart_items"]
+                    if isinstance(cart_items, list):
+                        products.extend(cart_items)
+        except Exception:
+            pass
+
+
+
     
     # Method 2: For product_link clicks, try page_meta as fallback
     if click_type == "product_link" and len(products) == 0:
@@ -132,49 +115,24 @@ def extract_products(row):
     # Format products consistently
     result = []
     for p in products:
-        if isinstance(p, dict) and p.get("asin"):  # Only include if it has an ASIN
+        if isinstance(p, dict):
             result.append({
                 "session_id": row["session_id"],
-                "asin": p.get("asin"),
-                "title": p.get("title"),
-                "price": p.get("price"),
-                "options": p.get("options") if "options" in p else None
+                "asin": p.get("asin") if "asin" in p else "0000000000", #default to a dummy ASIN if not present
+                "title": p.get("title") if "title" in p else "Unknown Title", #default to a dummy title if not present
+                "price": p.get("price") if "price" in p else "Unknown Price", #default to a dummy price if not present
+                "options": p.get("options") if "options" in p else None #default to a dummy options if not present
             })
     
     return result
 
-# Flatten all purchases into a single list
-purchased_items = []
-for _, row in purchase_actions.iterrows():
-    purchased_items.extend(extract_products(row))
-
-purchases_df = pd.DataFrame(purchased_items)
 
 
 
 
-# --- Step 8: Display results ---
-if len(purchases_df) == 0:
-    print(f"No recorded purchases for user {user_id}.")
-else:
-    print(f"\n Purchases made by {user_id}:\n")
-    print(format_purchases(purchases_df))
 
-# --- Step 9: Save consolidated JSON ---
-output_path = save_user_json(
-    user_id=user_id,
-    persona_text=persona_info,
-    user_sessions=user_sessions,
-    purchases_df=purchases_df,
-    out_path=args.out,
-)
-print(f"\n💾 Saved user JSON to: {output_path}")
-
-if __name__ == "__main__":
-    user_df = pd.read_parquet("hf://datasets/NEU-HAI/OPeRA/OPeRA_full/user/train/train.parquet")
-    session_df = pd.read_parquet("hf://datasets/NEU-HAI/OPeRA/OPeRA_full/session/train/train.parquet")
-    action_df = pd.read_parquet("hf://datasets/NEU-HAI/OPeRA/OPeRA_full/action/train/train.parquet")
-
+def build_dataset_for_user(user_df, session_df, action_df ):
+    
     # Collect all users' data
     all_data = []
     
@@ -261,20 +219,46 @@ if __name__ == "__main__":
             "gold_persona": gold_persona,
             "interactions": unique_interactions  # List of dicts with type field
         })
-        
-        # Count by type for reporting
+
         purchase_count = sum(1 for item in unique_interactions if item["type"] == "purchase")
         cart_count = sum(1 for item in unique_interactions if item["type"] == "cart")
         click_count = sum(1 for item in unique_interactions if item["type"] == "click")
         print(f"✓ User {user_id}: {len(unique_interactions)} interactions ({purchase_count} purchases, {cart_count} cart, {click_count} clicks)")
     
+
+    return all_data
+
+if __name__ == "__main__":
+    user_df = pd.read_parquet("hf://datasets/NEU-HAI/OPeRA/OPeRA_full/user/train/train.parquet")
+    session_df = pd.read_parquet("hf://datasets/NEU-HAI/OPeRA/OPeRA_full/session/train/train.parquet")
+    action_df = pd.read_parquet("hf://datasets/NEU-HAI/OPeRA/OPeRA_full/action/train/train.parquet")
+
+
+    #testing stuff
+    user_test_df = pd.read_parquet("hf://datasets/NEU-HAI/OPeRA/OPeRA_full/user/test/test.parquet")
+    test_session_df = pd.read_parquet("hf://datasets/NEU-HAI/OPeRA/OPeRA_full/session/test/test.parquet")
+    test_action_df = pd.read_parquet("hf://datasets/NEU-HAI/OPeRA/OPeRA_full/action/test/test.parquet")
+
+
+
+    # Collect all users' data
+    all_training_data = build_dataset_for_user(user_df, session_df, action_df)
+    all_test_data = build_dataset_for_user(user_test_df, test_session_df, test_action_df)
+        
+        # Count by type for reporting
+   
     # Now split the data
     import numpy as np
     from sklearn.model_selection import train_test_split
     
     # Shuffle and split: 70% train, 15% val, 15% test
-    train_data, temp_data = train_test_split(all_data, test_size=0.3, random_state=42)
-    val_data, test_data = train_test_split(temp_data, test_size=0.5, random_state=42)
+    train_data, val_data = train_test_split(
+        all_training_data,
+        test_size=0.1,
+        random_state=42,
+    )
+    test_data = all_test_data
+
     
     # Save as JSON (parquet doesn't handle nested lists well)
     os.makedirs("data", exist_ok=True)
@@ -287,7 +271,5 @@ if __name__ == "__main__":
         json.dump(test_data, f, indent=2)
     
     print(f"\n📊 Split: {len(train_data)} train, {len(val_data)} val, {len(test_data)} test")
-    print(f"📈 Total users processed: {len(all_data)}")
-    print(f"📈 Total users in dataset: {total_users}")
-    print(f"📈 Users skipped (no interview): {skipped_no_interview}")
-    print(f"📈 Expected users with interviews: {total_users - skipped_no_interview}")
+    print(f"📈 Total users processed: {len(all_training_data)} for training")
+    print(f"📈 Total users in test dataset: {len(all_test_data)} for testing")

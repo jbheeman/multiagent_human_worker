@@ -12,6 +12,7 @@ from smolagents.models import OpenAIServerModel
 import os
 import numpy as np
 from sentence_transformers import SentenceTransformer
+import textwrap
 
 
 
@@ -86,46 +87,60 @@ EvaluatorFn = Callable[[list[DataInst], Candidate], tuple[list[RolloutOutput], l
 
 
 BASE_PROMPT_STRING = """
-        Based on the following list of purchased products, please infer a persona for the user.
+Based on the following shopping interaction history, please infer a persona for the user.
 
-        **Purchased Products:**
-        {product_list_str}
+The interaction list may include:
+- **Purchased Products**: strong evidence of true preferences and needs.
+- **Items Added to Cart (but not bought)**: moderate evidence of interest or intent.
+- **Clicked / Viewed Items**: weak evidence of curiosity or early-stage interest.
 
-        **Instructions:**
-        You must follow these steps and show your work for each one:
-        1.  **Extract Traits:** For each product, identify key traits (e.g., brand, category, price point, features, implied hobbies or interests).
-        2.  **Identify Buying Patterns:** Look for patterns across all products to determine the user's buying habits and preferences.
-        3.  **Categorize Traits:** Group the user's inferred buying traits into the following four categories:
-            - **Confident Likes:** Things we are confident the person likes.
-            - **Somewhat Confident Likes:** Things we are somewhat confident the person likes.
-            - **Confident Dislikes:** Things we are confident the person dislikes.
-            - **Somewhat Confident Dislikes:** Things we are somewhat confident the person dislikes.
-        4.  **Generate Persona Description:** Based on the categorized traits, write a concise, plaintext paragraph describing the user's persona. This description should be suitable for guiding a research assistant.
-        5. Do not infer demographic details (age, gender, location, education level, family status, etc.), unless they are explicitly stated in the product descriptions. Focus only on shopping behavior and preferences.
+Treat purchases as the strongest signal, cart items as secondary, and clicks/views as the weakest signal.
 
-        **Output Format:**
-        You must provide your full reasoning for steps 1-3. After your reasoning, provide the final persona description enclosed in `<persona_description>` tags.
+{product_list_str}
 
-        **Example Output:**
-        **1. Extracted Traits:**
-        - Airkeep Car Air Freshener: Low price, home/car accessory, scent-focused.
-        - Lumiere & Co. Bike Seat Bag: Mid-range price, cycling accessory, practical.
-        ...
+**Instructions:**
+You must follow these steps and show your work for each one:
 
-        **2. Buying Patterns:**
-        - The user frequently buys cycling-related gear, suggesting a hobby in cycling.
-        - The user purchases items at various price points, but seems to value function over luxury.
-        ...
+1. **Extract Traits:** For each relevant product or interaction, identify key traits (e.g., brand, category, price point, features, implied hobbies or interests).
+2. **Identify Buying Patterns:** Look for patterns across interactions to determine the user's buying habits and preferences. Consider at least:
+   - Shopping frequency/intensity (do they appear to shop often or occasionally?)
+   - Price sensitivity (budget-conscious vs willing to pay more for quality)
+   - Category focus (e.g., pet care, electronics, home goods, beauty, etc.)
+   - Brand behavior (brand-loyal vs exploratory)
+   - How they might use reviews/ratings when choosing products
+   - Openness to novelty (trying new product types vs sticking to familiar ones)
+3. **Categorize Traits:** Group the user's inferred buying traits into the following four categories:
+   - **Confident Likes:** Things we are confident the person likes.
+   - **Somewhat Confident Likes:** Things we are somewhat confident the person likes.
+   - **Confident Dislikes:** Things we are confident the person dislikes.
+   - **Somewhat Confident Dislikes:** Things we are somewhat confident the person dislikes.
+4. **Generate Persona Description:** Based on the categorized traits, write a concise plaintext paragraph describing the user's *shopping persona*. This description should be suitable for guiding a research assistant and should be 3–6 sentences long.
+5. **Do not infer demographic details** (age, gender, location, education level, family status, etc.) unless they are explicitly stated in the product descriptions. Focus only on shopping behavior and preferences.
 
-        **3. Categorized Traits:**
-        - **Confident Likes:** Cycling, practical items.
-        - **Somewhat Confident Likes:** Home fragrance, pet safety.
-        ...
+**Output Format:**
+You must provide your full reasoning for steps 1–3. After your reasoning, provide the final persona description enclosed in `<persona_description>` tags.
 
-        <persona_description>
-        The user is a practical, budget-conscious individual who prioritizes functionality and value. They are an avid cyclist, investing in quality components for their hobby. They are not brand-loyal but seem to prefer items with good reviews and a focus on durability. They show some interest in home and pet accessories, but are not driven by luxury or high-end brands.
-        </persona_description>
-        """
+**Example Output:**
+**1. Extracted Traits:**
+- Airkeep Car Air Freshener: Low price, home/car accessory, scent-focused.
+- Lumiere & Co. Bike Seat Bag: Mid-range price, cycling accessory, practical.
+...
+
+**2. Buying Patterns:**
+- The user frequently buys cycling-related gear, suggesting a hobby in cycling.
+- The user purchases items at various price points, but seems to value function over luxury.
+...
+
+**3. Categorized Traits:**
+- **Confident Likes:** Cycling, practical items.
+- **Somewhat Confident Likes:** Home fragrance, pet safety.
+...
+
+<persona_description>
+The user is a practical, budget-conscious individual who prioritizes functionality and value. They are an avid cyclist, investing in quality components for their hobby. They are not brand-loyal but seem to prefer items with good reviews and a focus on durability. They show some interest in home and pet accessories, but are not driven by luxury or high-end brands.
+</persona_description>
+"""
+
 # BASE_PROMPT_STRING = BASE_PROMPT_STRING.format(product_list_str=product_list_str)
 
 
@@ -218,7 +233,7 @@ class ProposalFn(Protocol):
 class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
     def _build_product_list_str(self, interactions: list[dict[str, Any]], filter_type: str | list[str] | None = "purchase") -> str:
         """
-        Build a string of products filtered by type.
+        Build a string of products grouped by type with section headers.
         
         Args:
             interactions: List of interaction dicts with 'type', 'title', 'price', etc.
@@ -227,28 +242,71 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                 - A list of strings: ["purchase", "click"] to include multiple types
                 - None: include all interactions
         """
+        # Determine which types to include
         if filter_type is None:
-            filtered = interactions
+            types_to_include = ["purchase", "cart", "click"]
         elif isinstance(filter_type, list):
-            # Multiple filter types - include items matching any of them
-            filtered = [item for item in interactions if item.get("type") in filter_type]
+            types_to_include = filter_type
         else:
-            # Single filter type (backward compatible)
-            filtered = [item for item in interactions if item.get("type") == filter_type]
+            types_to_include = [filter_type]
         
-        return "\n".join([f"- {item['title']} ({item.get('price', 'N/A')})" for item in filtered])
-
+        # Group items by type
+        grouped = {
+            "purchase": [],
+            "cart": [],
+            "click": []
+        }
+        
+        for item in interactions:
+            if item.get("type") is None:
+                print(f"Item type is None: {item}")
+                continue
+            item_type = item.get("type")
+            if item_type in types_to_include and item_type in grouped:
+                grouped[item_type].append(item)
+        
+        # Build formatted sections
+        sections = []
+        
+        # Purchased Products section
+        if grouped["purchase"]:
+            purchase_lines = [f"- {item['title']} ({item.get('price', 'N/A')})" for item in grouped["purchase"]]
+            sections.append("**Purchased Products:**\n" + "\n".join(purchase_lines))
+        
+        # Items Added to Cart section
+        if grouped["cart"]:
+            cart_lines = [f"- {item['title']} ({item.get('price', 'N/A')})" for item in grouped["cart"]]
+            sections.append("**Items Added to Cart (but not bought):**\n" + "\n".join(cart_lines))
+        
+        # Clicked / Viewed Items section
+        if grouped["click"]:
+            click_lines = [f"- {item['title']} ({item.get('price', 'N/A')})" for item in grouped["click"]]
+            sections.append("**Clicked / Viewed Items:**\n" + "\n".join(click_lines))
+        
+        # Join all sections with double newline for spacing
+        return "\n\n".join(sections) if sections else ""
 
     def _score_persona(self, persona_description: str, gold_persona: str) -> float:
         """
         Score the persona description based on the gold persona.
         """
-        #Do we use BERT or something? 
         emb_pred = eval_model.encode(persona_description, normalize_embeddings=True)
         emb_gold = eval_model.encode(gold_persona, normalize_embeddings=True)
-        sim = float(np.dot(emb_pred, emb_gold))  # cosine because normalized
-        # Map from [-1, 1] to [0, 1]
-        return (sim + 1.0) / 2.0
+        cosine_score = (float(np.dot(emb_pred, emb_gold)) + 1.0) / 2.0
+
+        penalty = 0.0
+        forbidden_words = ["mother", "father", "student", "elderly", "grandmother", 
+                        "grandfather", "grandparent", "grandma", "grandpa"]
+        persona_lower = persona_description.lower()
+        gold_lower = gold_persona.lower()
+        
+        for word in forbidden_words:
+            if word in persona_lower and word not in gold_lower:
+                penalty += 0.15
+                print(f"Penalty applied: Hallucinated '{word}'")
+    
+        final_score = max(0.0, cosine_score - penalty)
+        return final_score
 
 
 
@@ -343,17 +401,51 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         trajectories = eval_batch.trajectories or []
         records: list[dict[str, Any]] = []
 
+        # Sort by score (lowest score = needs most improvement)
+        # We process the worst performing examples to get the best gradients
         sorted_trajs = sorted(trajectories, key=lambda t: t.score)
-        selected_trajs = sorted_trajs[: min(len(sorted_trajs), 16)]
+        
+        # KEY CHANGE: Reduce sample size slightly because we are adding LLM calls here. 
+        # 5-8 detailed critiques are often better than 16 generic ones.
+        selected_trajs = sorted_trajs[:8] 
+
+        print(f"Generating dynamic critiques for {len(selected_trajs)} trajectories...")
 
         for traj in selected_trajs:
+            # --- DYNAMIC JUDGE STEP ---
+            critique_prompt = f"""I am optimizing an AI to generate user shopping personas. 
+            Please compare the Ground Truth Persona with the Generated Persona based on the user's purchases.
+
+            User Purchases:
+            {traj.purchases_str}
+
+            Ground Truth Persona:
+            {traj.gold_persona}
+
+            Generated Persona (to critique):
+            {traj.generated_persona}
+
+            Task:
+            Identify exactly what the Generated Persona missed or got wrong compared to the Ground Truth. 
+            Did it hallucinate demographics? Did it miss a specific brand loyalty? Did it get the price sensitivity wrong?
+            Be specific and concise (1-2 sentences)."""
+                        
+            # We use the teacher model (Qwen3) to generate the critique
+            try:
+                # Note: We use the raw model or wrapper depending on your setup. 
+                # Since 'teacher_model' is your GEPACompatibleModel wrapper:
+                specific_critique = teacher_model(critique_prompt)
+            except Exception as e:
+                print(f"Critique generation failed: {e}")
+                specific_critique = "Improve alignment with the gold persona."
+
+            # Construct the feedback string
             feedback = (
                 f"Score: {traj.score:.3f}. "
-                "Improve alignment with the gold persona. "
-                "Avoid inferring demographics not supported by purchases. "
-                "Be explicit about shopping frequency, price sensitivity, main categories, "
-                "brand loyalty, and review usage when evidence exists."
+                f"Critique: {specific_critique} "
+                "Ensure the new prompt addresses these specific failures."
             )
+            # ---------------------------
 
             rec = {
                 "Inputs": {
@@ -373,12 +465,66 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
     propose_new_texts: ProposalFn | None = None
 
 
+def custom_proposal_function(
+    candidate: dict[str, str],
+    reflective_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
+    components_to_update: list[str],
+) -> dict[str, str]:
+    
+    current_prompt = candidate["persona_prompt"]
+    failures = reflective_dataset.get("persona_prompt", [])
+    
+    examples_str = ""
+    for i, fail in enumerate(failures):
+        examples_str += f"\n--- Example {i+1} ---\n"
+        examples_str += f"User Input (Purchases):\n{fail['Inputs']['purchases']}\n"
+        examples_str += f"Current AI Output:\n{fail['Generated Outputs']}\n"
+        examples_str += f"CRITIQUE (What went wrong):\n{fail['Feedback']}\n"
 
+    # Define the core instruction
+    meta_prompt_core = """You are an expert Prompt Engineer for an e-commerce AI system.
+Your goal is to optimize a "System Instruction" that converts a user's shopping history into a specific "Persona Description."
 
+I will show you:
+1. The CURRENT PROMPT being used.
+2. A list of FAILURE CASES (User History -> Generated Persona -> Critique).
 
+Your Task:
+Analyze the Critical Feedback. Identify patterns in what the Current Prompt is missing.
+Then, write a NEW, IMPROVED PROMPT that addresses these specific weaknesses.
 
+Guidelines for the New Prompt:
+- If critiques mention "Hallucinated Demographics," add strict constraints against guessing age/gender.
+- If critiques mention "Missed Price Sensitivity," add instructions to calculate average spend.
+- Keep the prompt structured (e.g., using Steps or Sections).
+- The output format must remain compatible with the existing code (keep the XML tags <persona_description>).
+
+Produce ONLY the new prompt text."""
+
+    # Construct the final input using dedent to strip code indentation
+    meta_prompt_input = textwrap.dedent(f"""
+    {meta_prompt_core}
+    
+    === CURRENT PROMPT ===
+    {current_prompt}
+    
+    === FAILURE ANALYSIS (Critiques from the Judge) ===
+    {examples_str}
+    
+    === TASK ===
+    Based on the critiques above, rewrite the "CURRENT PROMPT" to fix the recurring errors.
+    Ensure the new prompt forces the model to verify its claims against the purchase history.
+    Return ONLY the new prompt text, ready to be pasted into the system.
+    """)
+
+    # Call optimizer
+    new_prompt_text = teacher_model(meta_prompt_input, temperature=0.7)
+    
+    return {"persona_prompt": new_prompt_text}
 if __name__ == "__main__":
     #test loading 1 user and their purchases
+
+    
     
     
     
@@ -391,12 +537,13 @@ if __name__ == "__main__":
     trainset = load_persona_dataset("data/train.json")
     valset   = load_persona_dataset("data/val.json")
     adapter = PersonaGEPAAdapter()
+    adapter.propose_new_texts = custom_proposal_function
 
     gepa_result = gepa.optimize(
     seed_candidate=base_candidate,
     trainset=trainset,
     valset=valset,
-    max_metric_calls=100, # <-- Set a budget
+    max_metric_calls=200, # <-- Set a budget
     reflection_lm=teacher_model, # <-- Use a strong model to reflect on mistakes and propose better prompts
     adapter=adapter,
 )
