@@ -12,6 +12,7 @@ from smolagents.models import OpenAIServerModel
 import os
 import numpy as np
 from sentence_transformers import SentenceTransformer
+from sentence_transformers.cross_encoder import CrossEncoder
 import textwrap
 
 
@@ -45,6 +46,7 @@ class GEPACompatibleModel:
 
 
 eval_model = SentenceTransformer("all-mpnet-base-v2")
+nli_model = CrossEncoder('cross-encoder/nli-deberta-v3-base')
 
 #This model generates the persona description
 persona_model = OpenAIServerModel(
@@ -290,23 +292,22 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         """
         Score the persona description based on the gold persona.
         """
-        emb_pred = eval_model.encode(persona_description, normalize_embeddings=True)
-        emb_gold = eval_model.encode(gold_persona, normalize_embeddings=True)
-        cosine_score = (float(np.dot(emb_pred, emb_gold)) + 1.0) / 2.0
 
-        penalty = 0.0
-        forbidden_words = ["mother", "father", "student", "elderly", "grandmother", 
-                        "grandfather", "grandparent", "grandma", "grandpa"]
-        persona_lower = persona_description.lower()
-        gold_lower = gold_persona.lower()
+        # CrossEncoder input is a list of pairs: [(Premise, Hypothesis)]
+        # We ask: "Does the Gold Persona entail the Generated Persona?"
+        # (i.e., is the generated text factually consistent with the gold truth?)
+        scores = nli_model.predict([(gold_persona, persona_description)])
+
+        # The model outputs logits for [Contradiction, Neutral, Entailment]
+        # We want the probability of "Entailment" (index 2) or "Not Contradiction"
         
-        for word in forbidden_words:
-            if word in persona_lower and word not in gold_lower:
-                penalty += 0.15
-                print(f"Penalty applied: Hallucinated '{word}'")
-    
-        final_score = max(0.0, cosine_score - penalty)
-        return final_score
+        # We apply softmax to get probabilities
+
+        # Score = Probability of Entailment
+        # If Entailment is high, it means the generated persona aligns with the gold truth.
+        probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)
+        entailment_score = probs[0][2]
+        return float(entailment_score)
 
 
 
@@ -413,22 +414,30 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
 
         for traj in selected_trajs:
             # --- DYNAMIC JUDGE STEP ---
-            critique_prompt = f"""I am optimizing an AI to generate user shopping personas. 
-            Please compare the Ground Truth Persona with the Generated Persona based on the user's purchases.
+
+            critique_prompt = f"""
+            I am optimizing an AI to generate "Shopper Psychographics" from transaction logs.
+            Compare the Generated Persona with the Gold Truth.
 
             User Purchases:
             {traj.purchases_str}
 
-            Ground Truth Persona:
+            Gold Truth (Psychology):
             {traj.gold_persona}
 
-            Generated Persona (to critique):
+            Generated Output:
             {traj.generated_persona}
 
-            Task:
-            Identify exactly what the Generated Persona missed or got wrong compared to the Ground Truth. 
-            Did it hallucinate demographics? Did it miss a specific brand loyalty? Did it get the price sensitivity wrong?
-            Be specific and concise (1-2 sentences)."""
+            === CRITIQUE TASK ===
+            Does the Generated Output sound like a "Receipt Summary" or a "Psychological Profile"?
+
+            1. DEPTH CHECK: The Gold Truth often explains the *strategy* (e.g., "avoids sponsored ads," "shops offline for clothes"). Does the Generated Output miss this and just list items instead?
+            2. INFERENCE FAILURE: Look at the "Reviews" behavior. Does the Generated output assume "Viewing Items = Liking Reviews"? The Gold Truth might say they *ignore* reviews. Did the model get this backwards?
+            3. SPECIFICITY: If the Generated output says "User bought chicken and robot vacuums," it is failing. It should say "User prioritizes convenience and easy-prep meals."
+
+            Provide a critique that forces the model to stop listing items and start analyzing decision-making strategies.
+            """
+           
                         
             # We use the teacher model (Qwen3) to generate the critique
             try:
@@ -493,17 +502,24 @@ Your Task:
 Analyze the Critical Feedback. Identify patterns in what the Current Prompt is missing.
 Then, write a NEW, IMPROVED PROMPT that addresses these specific weaknesses.
 
-Guidelines for the New Prompt:
-- If critiques mention "Hallucinated Demographics," add strict constraints against guessing age/gender.
-- If critiques mention "Missed Price Sensitivity," add instructions to calculate average spend.
-- Keep the prompt structured (e.g., using Steps or Sections).
-- The output format must remain compatible with the existing code (keep the XML tags <persona_description>).
+CRITICAL GUIDELINES FOR THE NEW PROMPT:
+1. BAN "ITEM LISTING": The new prompt must explicitly forbid listing specific purchases (e.g., "Do not mention specific brand names like 'Sharpie' or 'Robitussin' unless establishing a pattern").
+2. FORCE "WHY" OVER "WHAT": The prompt must instruct the model to look at the *gaps* between clicks. (e.g., "If they viewed expensive items but bought the cheap one, infer Price Sensitivity, not Quality Seeking").
+3. DETECT "NEGATIVE SIGNALS": Instruct the model that *viewing* an item but *not buying* it is a signal of rejection. If they view highly-rated items but buy a low-rated one, they likely disregard reviews.
+4. SYNTHESIZE CATEGORIES: Instead of "Bought chicken and fries," require "Prefers convenience foods."
 
-Produce ONLY the new prompt text."""
+The new prompt should force the model to act like a Psychologist, not an Accountant.
+"""
 
     # Construct the final input using dedent to strip code indentation
     meta_prompt_input = textwrap.dedent(f"""
     {meta_prompt_core}
+
+    === HINT ===
+    Consider adding a mandatory "Analysis Step" in the new prompt where the model must answer: 
+    "What does the user's rejection of the other viewed items tell us about their priorities?"
+    before writing the final description.
+    
     
     === CURRENT PROMPT ===
     {current_prompt}

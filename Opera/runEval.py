@@ -4,57 +4,75 @@ from typing import Any
 from smolagents import OpenAIServerModel
 import os
 from sentence_transformers import SentenceTransformer
+from sentence_transformers.cross_encoder import CrossEncoder
+
 import numpy as np
 
-eval_model = SentenceTransformer("all-mpnet-base-v2")
+# eval_model = SentenceTransformer("all-mpnet-base-v2")
+nli_model = CrossEncoder('cross-encoder/nli-deberta-v3-base')
+
 
 gepa_prompt = """
 
-Based on the following list of purchased products, please infer a shopping behavior persona for the user that focuses exclusively on their purchasing decision-making patterns, not personal demographics.\n\n**Purchased Products:**\n{product_list_str}\n\n**Critical Instructions:**\n1. **Focus ONLY on shopping behaviors** - Do not infer age, gender, income level, personality traits, or personal interests beyond what is directly evidenced by purchasing patterns. The goal is to understand HOW they shop, not WHO they are.\n2. **Evidence-based analysis only** - Only include observations that can be directly supported by the purchase data. Avoid speculation about hobbies, lifestyle, or personal characteristics.\n3. **Key shopping behaviors to identify (treat all equally):**\n   - **Price sensitivity**: Evidence of comparing similar items at different price points, bulk purchases vs. premium versions, consistent price ranges for similar products\n   - **Review usage**: Patterns suggesting review reading (e.g., multiple similar products purchased, small incremental improvements between purchases, evidence of comparing positive/negative reviews)\n   - **Brand loyalty**: Repetition of specific brands vs. trying many different brands for similar products\n   - **Shopping frequency**: Bulk purchases vs. single items, repeat purchases of consumables, evidence of using specific search terms or keywords\n   - **Category focus**: Dominant product categories and how they relate to shopping approach\n   - **Sponsored product attitude**: Evidence of purchasing premium/sponsored-looking items OR avoiding them (e.g., multiple purchases of non-sponsored alternatives when sponsored options exist, purchasing items with similar features but different branding)\n   - **Delivery considerations**: Evidence suggesting delivery time was a factor (e.g., single urgent purchases of otherwise common items)\n\n4. **Special considerations based on evidence patterns:**\n   - If multiple similar items with incremental improvements are purchased, this suggests review usage\n   - If the user purchases both high-priced and low-priced items within the same category but avoids mid-range, this suggests specific price sensitivity patterns\n   - When products show evidence of being purchased after comparison (e.g., similar items with minor feature variations), note this as review usage evidence\n   - For sponsored product attitude, look for patterns where the user consistently chooses non-sponsored alternatives or demonstrates willingness to purchase sponsored items when they have favorable reviews\n   - For search behavior, note if multiple purchases indicate use of specific search terms (e.g., "organic," "non-slip," "for women" in product titles)\n   - Be mindful that price sensitivity may NOT be the dominant behavior in all cases - prioritize the most evidenced behaviors\n\n5. **Do NOT infer:**\n   - Age, gender, or income level\n   - Hobbies or personal interests (unless directly evidenced by multiple purchases)\n   - Personality traits (e.g., "health-conscious," "environmentally friendly")\n   - Language abilities or cultural background\n   - Relationship status or family composition\n\n**Required Steps (show your work for each):**\n1. **Extract Shopping Behaviors:** For each product, identify evidence of shopping patterns (e.g., price point relative to similar items, brand repetition, quantity purchased, product features that might indicate comparison shopping). Pay special attention to:\n   - Evidence of sponsored product selection/avoidance\n   - Patterns indicating review reading\n   - Specific search term usage patterns\n   - Frequency and timing of purchases\n\n2. **Identify Behavioral Patterns:** Look for consistent evidence across products regarding all key shopping behaviors. Prioritize behaviors with strongest evidence. Do not overemphasize price sensitivity if other behaviors are more prominent.\n\n3. **Categorize Behaviors:** Group the user\'s observed shopping behaviors into these categories:\n   - **Confident Behaviors:** Patterns clearly evidenced by multiple purchases (e.g., "Confidently compares multiple price points for similar items")\n   - **Somewhat Confident Behaviors:** Patterns suggested but with limited evidence\n   - **Confident Non-Behaviors:** Clear evidence of NOT engaging in certain behaviors (e.g., "Confidently does not purchase the same brand repeatedly")\n   - **Somewhat Confident Non-Behaviors:** Limited evidence suggesting absence of a behavior\n\n4. **Generate Persona Description:** Write a concise, evidence-based paragraph describing ONLY the user\'s shopping behavior patterns. Focus on how they make purchasing decisions, what factors influence them, and their approach to shopping on e-commerce platforms. Specifically address:\n   - Their attitude toward sponsored products (evidenced by purchase patterns)\n   - Their review usage patterns (if evidenced)\n   - How they approach product search (e.g., specific keywords, browsing)\n   - Their balance between price considerations and other factors\n   - Shopping frequency patterns for key categories\n\n**Output Format:**\n- Provide your full reasoning for steps 1-3\n- End with the final persona description enclosed in `<persona_description>` tags\n\n**Key Reminders:**\n- If there is no evidence for a particular shopping behavior, do not mention it\n- Never interpret product purchases as evidence of personal interests or demographics\n- The persona description must focus exclusively on observable shopping behaviors\n- Do not mention product categories as interests (e.g., don\'t say "likes art" - say "purchases multiple art supplies at varying price points indicating comparison shopping")\n- Only include what can be directly inferred from the purchase data\n- Be explicit about all seven key shopping behaviors when evidence exists\n- Prioritize evidence of sponsored product attitude and review usage when patterns exist\n- When users purchase multiple similar items with slight variations, this is evidence of review reading and comparison shopping\n- Avoid defaulting to price sensitivity as the primary behavior if other patterns are stronger
+
+Based on the following shopping interaction history, please infer a persona for the user.\n\nThe interaction list may include:\n- **Purchased Products**: strong evidence of true preferences and needs.\n- **Items Added to Cart (but not bought)**: moderate evidence of interest or intent.\n- **Clicked / Viewed Items**: weak evidence of curiosity or early-stage interest.\n\nTreat purchases as the strongest signal, cart items as secondary, and clicks/views as the weakest signal.\n\n{product_list_str}\n\n**Instructions:**\nYou must follow these steps and show your work for each one:\n\n1. **Extract Traits:** For each relevant product or interaction, identify key traits (e.g., brand, category, price point, features, implied hobbies or interests).\n2. **Identify Buying Patterns:** Look for patterns across interactions to determine the user's buying habits and preferences. Consider at least:\n   - Shopping frequency/intensity (do they appear to shop often or occasionally?)\n   - Price sensitivity (budget-conscious vs willing to pay more for quality)\n   - Category focus (e.g., pet care, electronics, home goods, beauty, etc.)\n   - Brand behavior (brand-loyal vs exploratory)\n   - How they might use reviews/ratings when choosing products\n   - Openness to novelty (trying new product types vs sticking to familiar ones)\n3. **Categorize Traits:** Group the user's inferred buying traits into the following four categories:\n   - **Confident Likes:** Things we are confident the person likes.\n   - **Somewhat Confident Likes:** Things we are somewhat confident the person likes.\n   - **Confident Dislikes:** Things we are confident the person dislikes.\n   - **Somewhat Confident Dislikes:** Things we are somewhat confident the person dislikes.\n4. **Generate Persona Description:** Based on the categorized traits, write a concise plaintext paragraph describing the user's *shopping persona*. This description should be suitable for guiding a research assistant and should be 3–6 sentences long.\n5. **Do not infer demographic details** (age, gender, location, education level, family status, etc.) unless they are explicitly stated in the product descriptions. Focus only on shopping behavior and preferences.\n\n**Output Format:**\nYou must provide your full reasoning for steps 1–3. After your reasoning, provide the final persona description enclosed in `<persona_description>` tags.\n\n**Example Output:**\n**1. Extracted Traits:**\n- Airkeep Car Air Freshener: Low price, home/car accessory, scent-focused.\n- Lumiere & Co. Bike Seat Bag: Mid-range price, cycling accessory, practical.\n...\n\n**2. Buying Patterns:**\n- The user frequently buys cycling-related gear, suggesting a hobby in cycling.\n- The user purchases items at various price points, but seems to value function over luxury.\n...\n\n**3. Categorized Traits:**\n- **Confident Likes:** Cycling, practical items.\n- **Somewhat Confident Likes:** Home fragrance, pet safety.\n...\n\n<persona_description>\nThe user is a practical, budget-conscious individual who prioritizes functionality and value. They are an avid cyclist, investing in quality components for their hobby. They are not brand-loyal but seem to prefer items with good reviews and a focus on durability. They show some interest in home and pet accessories, but are not driven by luxury or high-end brands.\n</persona_description>\n"
 """
 
 
 base_prompt = """
-        Based on the following list of purchased products, please infer a persona for the user.
+Based on the following shopping interaction history, please infer a persona for the user.
 
-        **Purchased Products:**
-        {product_list_str}
+The interaction list may include:
+- **Purchased Products**: strong evidence of true preferences and needs.
+- **Items Added to Cart (but not bought)**: moderate evidence of interest or intent.
+- **Clicked / Viewed Items**: weak evidence of curiosity or early-stage interest.
 
-        **Instructions:**
-        You must follow these steps and show your work for each one:
-        1.  **Extract Traits:** For each product, identify key traits (e.g., brand, category, price point, features, implied hobbies or interests).
-        2.  **Identify Buying Patterns:** Look for patterns across all products to determine the user's buying habits and preferences.
-        3.  **Categorize Traits:** Group the user's inferred buying traits into the following four categories:
-            - **Confident Likes:** Things we are confident the person likes.
-            - **Somewhat Confident Likes:** Things we are somewhat confident the person likes.
-            - **Confident Dislikes:** Things we are confident the person dislikes.
-            - **Somewhat Confident Dislikes:** Things we are somewhat confident the person dislikes.
-        4.  **Generate Persona Description:** Based on the categorized traits, write a concise, plaintext paragraph describing the user's persona. This description should be suitable for guiding a research assistant.
-        5. **Do not infer demographic details (age, gender, location, education level, family status, etc.), unless they are explicitly stated in the product descriptions. Focus only on shopping behavior and preferences.**
+Treat purchases as the strongest signal, cart items as secondary, and clicks/views as the weakest signal.
 
-        **Output Format:**
-        You must provide your full reasoning for steps 1-3. After your reasoning, provide the final persona description enclosed in `<persona_description>` tags.
+{product_list_str}
 
-        **Example Output:**
-        **1. Extracted Traits:**
-        - Airkeep Car Air Freshener: Low price, home/car accessory, scent-focused.
-        - Lumiere & Co. Bike Seat Bag: Mid-range price, cycling accessory, practical.
-        ...
+**Instructions:**
+You must follow these steps and show your work for each one:
 
-        **2. Buying Patterns:**
-        - The user frequently buys cycling-related gear, suggesting a hobby in cycling.
-        - The user purchases items at various price points, but seems to value function over luxury.
-        ...
+1. **Extract Traits:** For each relevant product or interaction, identify key traits (e.g., brand, category, price point, features, implied hobbies or interests).
+2. **Identify Buying Patterns:** Look for patterns across interactions to determine the user's buying habits and preferences. Consider at least:
+   - Shopping frequency/intensity (do they appear to shop often or occasionally?)
+   - Price sensitivity (budget-conscious vs willing to pay more for quality)
+   - Category focus (e.g., pet care, electronics, home goods, beauty, etc.)
+   - Brand behavior (brand-loyal vs exploratory)
+   - How they might use reviews/ratings when choosing products
+   - Openness to novelty (trying new product types vs sticking to familiar ones)
+3. **Categorize Traits:** Group the user's inferred buying traits into the following four categories:
+   - **Confident Likes:** Things we are confident the person likes.
+   - **Somewhat Confident Likes:** Things we are somewhat confident the person likes.
+   - **Confident Dislikes:** Things we are confident the person dislikes.
+   - **Somewhat Confident Dislikes:** Things we are somewhat confident the person dislikes.
+4. **Generate Persona Description:** Based on the categorized traits, write a concise plaintext paragraph describing the user's *shopping persona*. This description should be suitable for guiding a research assistant and should be 3–6 sentences long.
+5. **Do not infer demographic details** (age, gender, location, education level, family status, etc.) unless they are explicitly stated in the product descriptions. Focus only on shopping behavior and preferences.
 
-        **3. Categorized Traits:**
-        - **Confident Likes:** Cycling, practical items.
-        - **Somewhat Confident Likes:** Home fragrance, pet safety.
-        ...
+**Output Format:**
+You must provide your full reasoning for steps 1–3. After your reasoning, provide the final persona description enclosed in `<persona_description>` tags.
 
-        <persona_description>
-        The user is a practical, budget-conscious individual who prioritizes functionality and value. They are an avid cyclist, investing in quality components for their hobby. They are not brand-loyal but seem to prefer items with good reviews and a focus on durability. They show some interest in home and pet accessories, but are not driven by luxury or high-end brands.
-        </persona_description>
-        """
+**Example Output:**
+**1. Extracted Traits:**
+- Airkeep Car Air Freshener: Low price, home/car accessory, scent-focused.
+- Lumiere & Co. Bike Seat Bag: Mid-range price, cycling accessory, practical.
+...
+
+**2. Buying Patterns:**
+- The user frequently buys cycling-related gear, suggesting a hobby in cycling.
+- The user purchases items at various price points, but seems to value function over luxury.
+...
+
+**3. Categorized Traits:**
+- **Confident Likes:** Cycling, practical items.
+- **Somewhat Confident Likes:** Home fragrance, pet safety.
+...
+
+<persona_description>
+The user is a practical, budget-conscious individual who prioritizes functionality and value. They are an avid cyclist, investing in quality components for their hobby. They are not brand-loyal but seem to prefer items with good reviews and a focus on durability. They show some interest in home and pet accessories, but are not driven by luxury or high-end brands.
+</persona_description>
+"""
 
 
 # === Best persona prompt ===
@@ -93,11 +111,10 @@ def _score_persona(persona_description: str, gold_persona: str) -> float:
     Score the persona description based on the gold persona.
     """
     #Do we use BERT or something? 
-    emb_pred = eval_model.encode(persona_description, normalize_embeddings=True)
-    emb_gold = eval_model.encode(gold_persona, normalize_embeddings=True)
-    sim = float(np.dot(emb_pred, emb_gold))  # cosine because normalized
-    # Map from [-1, 1] to [0, 1]
-    return (sim + 1.0) / 2.0
+    scores = nli_model.predict([(gold_persona, persona_description)])
+    probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)
+    entailment_score = probs[0][2]
+    return float(entailment_score)
 
 
 def _build_product_list_str(interactions: list[dict[str, Any]] | None, filter_type: str | list[str] | None = "purchase") -> str:
