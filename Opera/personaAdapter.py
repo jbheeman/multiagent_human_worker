@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Generic, Protocol, TypeVar
 import json
+import re
 from gepa.core.adapter import GEPAAdapter, EvaluationBatch
 import gepa
 
@@ -50,14 +51,14 @@ nli_model = CrossEncoder('cross-encoder/nli-deberta-v3-base')
 
 #This model generates the persona description
 persona_model = OpenAIServerModel(
-        model_id="gemma3",
+        model_id="qwen3",
         api_base="https://ellm.nrp-nautilus.io/v1",
         api_key=os.getenv("NAUT_API_KEY"),
     )
 
 #This model evaluates the persona description   
 teacher_model_raw= OpenAIServerModel( # Still used for persona agent
-        model_id="qwen3",
+        model_id="gpt-oss",
         api_base="https://ellm.nrp-nautilus.io/v1",
         api_key=os.getenv("NAUT_API_KEY"),
     )
@@ -288,6 +289,47 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         # Join all sections with double newline for spacing
         return "\n\n".join(sections) if sections else ""
 
+    def _score_with_llm(self, generated: str, gold: str) -> float:
+        # We ask the Teacher (Qwen) to be a harsh professor.
+        rubric_prompt = f"""
+        You are a psychology professor grading a student's analysis of a consumer.
+        
+        Gold Standard Profile (The Truth):
+        "{gold}"
+        
+        Student's Generated Profile:
+        "{generated}"
+        
+        Grade the Student's Profile on a scale of 0.0 to 1.0 based ONLY on these criteria:
+        
+        1. **Abstraction Level (Max 0.4):** Does the student identify *strategies* (e.g., "avoids sponsored ads")? Or do they just list items (e.g., "bought a license plate")? 
+        - PENALIZE heavily for listing specific items like "chicken", "fries", or specific university names unless they explain the *psychology* behind it.
+        
+        2. **Completeness of Insight (Max 0.4):** Did they catch the nuance about *reviews*? (e.g., Gold says "reads reviews for UNFAMILIAR products"). Did they catch the "Online vs Offline" split?
+        
+        3. **Factuality (Max 0.2):** Are there any contradictions?
+
+        Return ONLY the numeric float score (e.g., 0.75). Do not write an explanation.
+        """
+    
+        # Call your teacher model - pass as string to get consistent string response
+        response_str = teacher_model(rubric_prompt)
+        # Ensure response is a string
+        if not isinstance(response_str, str):
+            response_str = str(response_str)
+        # Extract numeric score from response
+        try:
+            # Try to find a float in the response
+            score_match = re.search(r'0?\.\d+|1\.0|\d+\.\d+', response_str.strip())
+            if score_match:
+                score_str = score_match.group(0)
+            else:
+                score_str = response_str.strip()
+            return float(score_str)
+        except (ValueError, AttributeError) as e:
+            print(f"Warning: Could not parse score from response: {response_str}, error: {e}")
+            return 0.0
+
     def _score_persona(self, persona_description: str, gold_persona: str) -> float:
         """
         Score the persona description based on the gold persona.
@@ -307,7 +349,18 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         # If Entailment is high, it means the generated persona aligns with the gold truth.
         probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)
         entailment_score = probs[0][2]
-        return float(entailment_score)
+        nli_score =  float(entailment_score)
+
+       
+    
+        if nli_score < 0.3:
+            # If it contradicts the truth, fail immediately. Don't waste money on LLM scoring.
+            return nli_score 
+            
+        # 2. Quality Check (LLM Judge): Is it insightful?
+        llm_quality_score = self._score_with_llm(persona_description, gold_persona)
+        
+        return llm_quality_score
 
 
 
@@ -325,8 +378,8 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
             )
         return examples
 
+   
         
-    
     
     def evaluate(
         self,
