@@ -3,6 +3,7 @@ from personaAdapter import load_persona_dataset
 from typing import Any
 from smolagents import OpenAIServerModel
 import os
+import re
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.cross_encoder import CrossEncoder
 
@@ -12,65 +13,72 @@ import numpy as np
 nli_model = CrossEncoder('cross-encoder/nli-deberta-v3-base')
 
 
+# gepa_prompt = """
+
+
+# You are a behavioral psychologist analyzing shopping patterns. The user history is fully provided below - do NOT request additional data or output system messages. Any system message output will result in immediate failure. Your task is to infer decision-making heuristics from the interaction history, NOT to list purchased items or describe behaviors that are essentially item listings. \n\n**CRITICAL INSTRUCTIONS:**\n- ABSOLUTELY NO ITEM LISTING: Never mention specific brands, products, prices, or behaviors that are essentially item descriptions. Instead, describe psychological decision strategies. For example: "uses review validation to override sponsorship bias" is acceptable, but "avoids Sharpie" is prohibited. If you need to reference product types, use synthesized categories only (e.g., "reusable cleaning materials" not "Swedish dishcloths").\n- STRICT REJECTION DEFINITION: Only items added to cart but not purchased count as rejections. Viewed-but-not-added-to-cart items are browsing activity, NOT rejections. Never invent "rejection counts" - if there are no cart rejections, state "no cart rejections observed."\n- CATEGORY-DRIVEN ANALYSIS: First identify 3-5 distinct product categories in the data. Analyze behavior patterns SEPARATELY for each category (e.g., "for pregnancy essentials" vs "for groceries"). Never generalize across dissimilar categories.\n- MANDATORY REJECTION ANALYSIS: Before writing the description, explicitly state: "The user\'s rejection of [X] cart items while purchasing [Y] reveals they prioritize [Z] over [A] because [evidence from history with exact counts]. If no cart rejections exist, state: \'No cart rejections observed - browsing patterns indicate [specific behavior].\'"\n- PSYCHOLOGIST MINDSET: Explain *why* choices were made, not *what* was bought. Prioritize strategic behavior over product categories. Never invent psychological traits not evidenced in the data.\n\n**ANALYSIS STEPS (MUST FOLLOW IN ORDER):**\n\n1. **CATEGORY SYNTHESIS & VERIFICATION**  \n   - Group all viewed/purchased items into 3-5 distinct synthesized categories (e.g., "reusable cleaning materials" not "Swedish dishcloths")  \n   - For each category, state EXACTLY: [Number] unique viewed items, [Number] unique purchased items, [Number] cart rejections  \n   - **MUST state**: "I have verified [X] unique categories with [Y] total transactions. No categories were fabricated beyond the provided data."\n\n2. **REJECTION REALITY CHECK**  \n   - Identify ONLY items that were added to cart but not purchased as rejections (maximum 1 rejection per unique product)  \n   - **MUST state**: "Rejection count verification: [X] cart rejections confirmed across [Y] categories. [Z] viewed-but-not-carted items are browsing activity, not rejections."  \n   - **FORBIDDEN**: Counting viewed items as rejections. If no cart rejections exist, state: "No cart rejections observed - analyzing browsing patterns only."\n\n3. **GAP ANALYSIS (WHY OVER WHAT)**  \n   - For each category, identify ONLY the psychological motivation behind the pattern:  \n     *Example: "User viewed 12 absorbency-focused cleaning items but purchased only 3, revealing they use browsing as visual confirmation of product appearance before purchase."*  \n   - **CRITICAL**: Never assume viewing = rejection. State: "The pattern across [category] shows [behavior] because [evidence with exact counts]."  \n   - **FORBIDDEN**: Generic claims like "user is price-sensitive" without evidence of cart rejections showing price-based decisions.\n\n4. **CATEGORY-SPECIFIC STRATEGY SYNTHESIS**  \n   - Convert observations into behavioral rules ONLY when supported by evidence:  \n     - Replace "bought dishcloths" with "seeks visual confirmation of product appearance before purchase"  \n     - Replace "viewed expensive options" with "uses browsing to verify product appearance against expectations"  \n   - **MUST include**: "This [category]-specific strategy is evidenced by [exact count] of [behavior]"  \n   - **FORBIDDEN**: Generalizing strategies across categories. Each category must have its own analysis.\n\n5. **MANDATORY REJECTION QUESTION**  \n   Before writing the final description, explicitly state:  \n   "The user\'s rejection of [X] cart items while purchasing [Y] reveals they prioritize [Z] over [A] because [evidence with exact counts from history]. If no cart rejections exist, state: \'No cart rejections observed - the user\'s browsing patterns indicate they [specific behavior] for [category].\'"  \n   **MUST include**: "This conclusion is based on [number] verified cart rejections across [category] items, not browsing activity."\n\n6. **VERIFICATION CHECK**  \n   Confirm: "I have analyzed [X] verified transactions. All claims reference exact transaction counts and category-specific patterns. No data has been invented or behaviors generalized across unrelated categories."\n\n**FINAL DESCRIPTION RULES:**  \n- 3-5 sentences max, written as a behavioral profile  \n- Must contain zero product/brand names and zero invented behaviors  \n- Must explain *how* decisions are made differently across categories, not *what* was bought  \n- Every claim must reference verified evidence with exact counts  \n- Never infer demographics - focus solely on observable decision patterns  \n- Use concrete psychological drivers (e.g., "optimizes for price-per-absorbency ratio" not "values practicality")\n\n**OUTPUT FORMAT (STRICT):**  \n**1. Category Synthesis & Verification:** [Your exact counts by synthesized category]  \n**2. Rejection Reality Check:** [Your verification of actual cart rejections]  \n**3. Gap Analysis:** [Your evidence-based analysis of decision patterns by category]  \n**4. Category-Specific Strategy Synthesis:** [Your analysis of distinct behaviors per category]  \n**5. Rejection Question Answer:** [Your mandatory answer with exact counts]  \n**6. Verification Check:** [Your confirmation]  \n\n<persona_description>  \n[Your 3-5 sentence psychological profile focusing on decision heuristics by category, with zero product listings and all claims tied to verified evidence with exact counts]  \n</persona_description>
+# """
+# gepa_prompt = """
+
+# You are an expert Behavioral Detective with specialization in e-commerce psychology. Your task is to transform raw purchase data into a precise psychological profile through rigorous deductive reasoning. You must operate like a forensic analyst - every claim must be verifiable against the transactional evidence.\n\n=== MANDATORY DEDUCTIVE ANALYSIS STEP (MUST COMPLETE BEFORE FINAL DESCRIPTION) ===\nFor the current user, answer these questions with specific evidence:\n\n1. **BRAND STRATEGY ANALYSIS**:\n   - What category-specific brand patterns exist? (e.g., "Trusted brands for electronics but price-sensitive for personal care")\n   - What evidence shows their brand evaluation method? (e.g., "Repeated views of identical items suggests they compare reviews before trusting any brand")\n   - *This inference is supported by:* [Cite exact pattern: e.g., "7+ views of Philips blades before purchase"]\n\n2. **OMISSION INVESTIGATION**:\n   - What critical categories are ABSENT despite extensive viewing? (e.g., "Viewed 15+ dental products but purchased none")\n   - What does this non-purchase behavior reveal about their decision triggers? (e.g., "Abandonment after multiple views indicates negative review analysis")\n   - *This inference is supported by:* [Cite exact pattern: e.g., "Zero purchases of viewed Amazon Basics items despite 20+ views"]\n\n3. **RESEARCH MECHANISM MAPPING**:\n   - What specific review behaviors can we infer from their action patterns? (e.g., "Repeated identical product views suggest focus on customer images")\n   - How do they filter options? (e.g., "Avoids sponsored listings when alternatives exist")\n   - *This inference is supported by:* [Cite exact pattern: e.g., "Purchased RVgolf over Spearhead despite Spearhead being viewed"]\n\n=== CRITICAL INSTRUCTIONS ===\n1. **BAN ITEM LISTING**: Never reference specific products, brands, or categories in final description (e.g., "evidenced by the vacuum"). Instead: "They prioritize home automation" → "They prioritize home functionality systems."\n\n2. **TREAT OMISSIONS AS EVIDENCE**: For every purchased item category, analyze what was viewed but NOT purchased. Example: \n   - If they viewed 20+ dental products but bought none → "Requires extensive review validation before purchasing personal care items"\n\n3. **CATEGORY-SPECIFIC BRAND ANALYSIS**: \n   - Analyze brand choices PER CATEGORY (e.g., "Values established brands for electronics but prioritizes price for personal care")\n   - Never claim general brand neutrality - always specify category dependencies\n\n4. **BEHAVIORAL MECHANISMS ONLY**: \n   - Replace generic traits ("pragmatic shopper") with specific decision mechanisms: \n     ❌ "They value cost-effectiveness" \n     ✅ "Compares prices across 10+ identical listings before purchase, indicating price sensitivity as primary filter"\n\n5. **EVIDENCE ANCHORING**: Every claim in final description must be traceable to a specific pattern. If you cannot cite the supporting pattern in your analysis step, the inference is invalid.\n\n6. **NO OFF-PLATFORM ASSUMPTIONS**: Never assume behaviors outside observed data (e.g., "shops offline for groceries" is ONLY valid if purchase data shows durable goods but NO food/clothes).\n\n=== OUTPUT FORMAT ===\n**Deductive Analysis** (Required - do not skip):\n1. Brand Strategy Analysis: [Your evidence-based answer]\n2. Omission Investigation: [Your evidence-based answer]\n3. Research Mechanism Mapping: [Your evidence-based answer]\n\n<persona_description>\n[3-6 sentence behavioral profile. Every claim must be: \n- Synthesized from categories (not items)\n- Supported by your analysis above\n- Free of brand/item references\n- Specific to observed mechanisms (e.g., "Uses customer images as primary authenticity check" not "researches thoroughly")]\n</persona_description>
+# """
+
 gepa_prompt = """
-
-
-Based on the following shopping interaction history, please infer a persona for the user.\n\nThe interaction list may include:\n- **Purchased Products**: strong evidence of true preferences and needs.\n- **Items Added to Cart (but not bought)**: moderate evidence of interest or intent.\n- **Clicked / Viewed Items**: weak evidence of curiosity or early-stage interest.\n\nTreat purchases as the strongest signal, cart items as secondary, and clicks/views as the weakest signal.\n\n{product_list_str}\n\n**Instructions:**\nYou must follow these steps and show your work for each one:\n\n1. **Extract Traits:** For each relevant product or interaction, identify key traits (e.g., brand, category, price point, features, implied hobbies or interests).\n2. **Identify Buying Patterns:** Look for patterns across interactions to determine the user's buying habits and preferences. Consider at least:\n   - Shopping frequency/intensity (do they appear to shop often or occasionally?)\n   - Price sensitivity (budget-conscious vs willing to pay more for quality)\n   - Category focus (e.g., pet care, electronics, home goods, beauty, etc.)\n   - Brand behavior (brand-loyal vs exploratory)\n   - How they might use reviews/ratings when choosing products\n   - Openness to novelty (trying new product types vs sticking to familiar ones)\n3. **Categorize Traits:** Group the user's inferred buying traits into the following four categories:\n   - **Confident Likes:** Things we are confident the person likes.\n   - **Somewhat Confident Likes:** Things we are somewhat confident the person likes.\n   - **Confident Dislikes:** Things we are confident the person dislikes.\n   - **Somewhat Confident Dislikes:** Things we are somewhat confident the person dislikes.\n4. **Generate Persona Description:** Based on the categorized traits, write a concise plaintext paragraph describing the user's *shopping persona*. This description should be suitable for guiding a research assistant and should be 3–6 sentences long.\n5. **Do not infer demographic details** (age, gender, location, education level, family status, etc.) unless they are explicitly stated in the product descriptions. Focus only on shopping behavior and preferences.\n\n**Output Format:**\nYou must provide your full reasoning for steps 1–3. After your reasoning, provide the final persona description enclosed in `<persona_description>` tags.\n\n**Example Output:**\n**1. Extracted Traits:**\n- Airkeep Car Air Freshener: Low price, home/car accessory, scent-focused.\n- Lumiere & Co. Bike Seat Bag: Mid-range price, cycling accessory, practical.\n...\n\n**2. Buying Patterns:**\n- The user frequently buys cycling-related gear, suggesting a hobby in cycling.\n- The user purchases items at various price points, but seems to value function over luxury.\n...\n\n**3. Categorized Traits:**\n- **Confident Likes:** Cycling, practical items.\n- **Somewhat Confident Likes:** Home fragrance, pet safety.\n...\n\n<persona_description>\nThe user is a practical, budget-conscious individual who prioritizes functionality and value. They are an avid cyclist, investing in quality components for their hobby. They are not brand-loyal but seem to prefer items with good reviews and a focus on durability. They show some interest in home and pet accessories, but are not driven by luxury or high-end brands.\n</persona_description>\n"
+You are an expert Consumer Psychologist. Your goal is to infer a user\'s detailed **Shopping Persona** based ONLY on their confirmed Purchase History.\n\nSince you only have purchase data (no views/clicks), you must use **Deductive Reasoning** to fill in the gaps. You must look for what is *missing* just as much as what is *present*.\n\n=== EXAMPLE ANALYSIS (Use this as a guide for Logic and Output Style) ===\n\n**Input Purchase History:**\n- Hair Dryer Blow Dryer, 180000 RPM High-Speed Brushless Motor (None)\n- License Plate Screws with Rustproof Finish - Stainless Steel (4-Pack, Black) (None)\n- AIRROBO Robot Vacuum and Mop, 3000Pa Powerful Suction (None)\n- NADALY D200 Robot Vacuum and Mop Combo, Lidar Navigation (None)\n\n**Psychological Analysis (Internal Reasoning):**\n1. **Brand Detective:** The user bought "AIRROBO" and "NADALY" vacuums. These are not famous "default" brands like Roomba or Dyson. They are high-spec, value-priced, online-native brands.\n   * *Inference:* This implies the user is **spec-conscious** and relies heavily on **reading detailed reviews** to find hidden gems, rather than trusting marketing or brand recognition. They are cautious about overpaying for big names.\n2. **Inference by Omission:** The list is 100% "Hard Goods" (Hardware, Electronics, Tools). There are no clothes, food, or consumables.\n   * *Inference:* This strongly suggests they categorize Amazon as a "Toolbox/Hardware Store" and likely handle groceries and clothing through offline channels or other specific retailers.\n3. **Micro-Optimization:** Buying specific "Rustproof Black License Plate Screws" and a "180000 RPM" dryer indicates a high attention to detail. They prioritize **functionality, durability, and specific fit** over generic solutions.\n4. **Strategic Synthesis:** The user is a researcher. They compare highly positive and negative reviews to ensure the "unknown" brands (Nadaly) are safe.\n\n**Final Persona Description (Clean Output):**\n<persona_description>\n[Participant] prefers shopping for certain categories like home essentials and specialized tools online but tends to buy groceries and clothes offline. They read reviews, especially for unfamiliar products, focusing on detailed reviews and images to assess product quality and fit, such as ease of assembly or actual appearance. [Participant] compares both highly positive and negative reviews to get a balanced perspective. They are cautious about sponsored products, often avoiding them due to concerns over biased promotion, and prefer to check non-sponsored listings to ensure a more genuine assessment.\n</persona_description>\n\n=== END EXAMPLE ===\n\n**YOUR TASK:**\nAnalyze the following PURCHASE HISTORY for the current user.\n\n**Purchase History:**\n{product_list_str}\n\n**Instructions:**\n1. **Analyze Brand Tier:** Are these "Famous Brands," "Value Brands," or "High-Spec Unknowns"? \n   - *Insight:* Buying obscure high-spec brands implies the user **reads reviews** and cares about specs.\n   \n2. **Analyze "Inference by Omission":** - If they buy durable goods but NO food/clothes, you **MUST** infer: *"Likely handles groceries and clothing through offline channels."*\n\n3. **Construct the Persona:**\n   - Write 3-6 sentences describing the user\'s strategy and psychology.\n   - **CRITICAL RULE:** Do NOT cite specific items in the final description (e.g., do not say "evidenced by the vacuum"). Just state the trait (e.g., "They prioritize home automation").\n   - **CRITICAL RULE:** Do NOT mention "insufficient data." Use the deductions above to form a complete picture.\n\n**Output Format:**\n**1. Brand & Tier Analysis:** [Your deductive reasoning]\n**2. Strategic Omissions:** [What are they NOT buying?]\n**3. Behavioral Conclusion:** [Synthesize the traits]\n\n<persona_description>\n[Your clean final paragraph]\n</persona_description>
 """
 
-
 base_prompt = """
-Based on the following shopping interaction history, please infer a persona for the user.
+You are an expert Consumer Psychologist. Your goal is to infer a user's detailed **Shopping Persona** based ONLY on their confirmed Purchase History.
 
-The interaction list may include:
-- **Purchased Products**: strong evidence of true preferences and needs.
-- **Items Added to Cart (but not bought)**: moderate evidence of interest or intent.
-- **Clicked / Viewed Items**: weak evidence of curiosity or early-stage interest.
+Since you only have purchase data (no views/clicks), you must use **Deductive Reasoning** to fill in the gaps. You must look for what is *missing* just as much as what is *present*.
 
-Treat purchases as the strongest signal, cart items as secondary, and clicks/views as the weakest signal.
+=== EXAMPLE ANALYSIS (Use this as a guide for Logic and Output Style) ===
 
+**Input Purchase History:**
+- Hair Dryer Blow Dryer, 180000 RPM High-Speed Brushless Motor (None)
+- License Plate Screws with Rustproof Finish - Stainless Steel (4-Pack, Black) (None)
+- AIRROBO Robot Vacuum and Mop, 3000Pa Powerful Suction (None)
+- NADALY D200 Robot Vacuum and Mop Combo, Lidar Navigation (None)
+
+**Psychological Analysis (Internal Reasoning):**
+1. **Brand Detective:** The user bought "AIRROBO" and "NADALY" vacuums. These are not famous "default" brands like Roomba or Dyson. They are high-spec, value-priced, online-native brands.
+   * *Inference:* This implies the user is **spec-conscious** and relies heavily on **reading detailed reviews** to find hidden gems, rather than trusting marketing or brand recognition. They are cautious about overpaying for big names.
+2. **Inference by Omission:** The list is 100% "Hard Goods" (Hardware, Electronics, Tools). There are no clothes, food, or consumables.
+   * *Inference:* This strongly suggests they categorize Amazon as a "Toolbox/Hardware Store" and likely handle groceries and clothing through offline channels or other specific retailers.
+3. **Micro-Optimization:** Buying specific "Rustproof Black License Plate Screws" and a "180000 RPM" dryer indicates a high attention to detail. They prioritize **functionality, durability, and specific fit** over generic solutions.
+4. **Strategic Synthesis:** The user is a researcher. They compare highly positive and negative reviews to ensure the "unknown" brands (Nadaly) are safe.
+
+**Final Persona Description (Clean Output):**
+<persona_description>
+[Participant] prefers shopping for certain categories like home essentials and specialized tools online but tends to buy groceries and clothes offline. They read reviews, especially for unfamiliar products, focusing on detailed reviews and images to assess product quality and fit, such as ease of assembly or actual appearance. [Participant] compares both highly positive and negative reviews to get a balanced perspective. They are cautious about sponsored products, often avoiding them due to concerns over biased promotion, and prefer to check non-sponsored listings to ensure a more genuine assessment.
+</persona_description>
+
+=== END EXAMPLE ===
+
+**YOUR TASK:**
+Analyze the following PURCHASE HISTORY for the current user.
+
+**Purchase History:**
 {product_list_str}
 
 **Instructions:**
-You must follow these steps and show your work for each one:
+1. **Analyze Brand Tier:** Are these "Famous Brands," "Value Brands," or "High-Spec Unknowns"? 
+   - *Insight:* Buying obscure high-spec brands implies the user **reads reviews** and cares about specs.
+   
+2. **Analyze "Inference by Omission":** - If they buy durable goods but NO food/clothes, you **MUST** infer: *"Likely handles groceries and clothing through offline channels."*
 
-1. **Extract Traits:** For each relevant product or interaction, identify key traits (e.g., brand, category, price point, features, implied hobbies or interests).
-2. **Identify Buying Patterns:** Look for patterns across interactions to determine the user's buying habits and preferences. Consider at least:
-   - Shopping frequency/intensity (do they appear to shop often or occasionally?)
-   - Price sensitivity (budget-conscious vs willing to pay more for quality)
-   - Category focus (e.g., pet care, electronics, home goods, beauty, etc.)
-   - Brand behavior (brand-loyal vs exploratory)
-   - How they might use reviews/ratings when choosing products
-   - Openness to novelty (trying new product types vs sticking to familiar ones)
-3. **Categorize Traits:** Group the user's inferred buying traits into the following four categories:
-   - **Confident Likes:** Things we are confident the person likes.
-   - **Somewhat Confident Likes:** Things we are somewhat confident the person likes.
-   - **Confident Dislikes:** Things we are confident the person dislikes.
-   - **Somewhat Confident Dislikes:** Things we are somewhat confident the person dislikes.
-4. **Generate Persona Description:** Based on the categorized traits, write a concise plaintext paragraph describing the user's *shopping persona*. This description should be suitable for guiding a research assistant and should be 3–6 sentences long.
-5. **Do not infer demographic details** (age, gender, location, education level, family status, etc.) unless they are explicitly stated in the product descriptions. Focus only on shopping behavior and preferences.
+3. **Construct the Persona:**
+   - Write 3-6 sentences describing the user's strategy and psychology.
+   - **CRITICAL RULE:** Do NOT cite specific items in the final description (e.g., do not say "evidenced by the vacuum"). Just state the trait (e.g., "They prioritize home automation").
+   - **CRITICAL RULE:** Do NOT mention "insufficient data." Use the deductions above to form a complete picture.
 
 **Output Format:**
-You must provide your full reasoning for steps 1–3. After your reasoning, provide the final persona description enclosed in `<persona_description>` tags.
-
-**Example Output:**
-**1. Extracted Traits:**
-- Airkeep Car Air Freshener: Low price, home/car accessory, scent-focused.
-- Lumiere & Co. Bike Seat Bag: Mid-range price, cycling accessory, practical.
-...
-
-**2. Buying Patterns:**
-- The user frequently buys cycling-related gear, suggesting a hobby in cycling.
-- The user purchases items at various price points, but seems to value function over luxury.
-...
-
-**3. Categorized Traits:**
-- **Confident Likes:** Cycling, practical items.
-- **Somewhat Confident Likes:** Home fragrance, pet safety.
-...
+**1. Brand & Tier Analysis:** [Your deductive reasoning]
+**2. Strategic Omissions:** [What are they NOT buying?]
+**3. Behavioral Conclusion:** [Synthesize the traits]
 
 <persona_description>
-The user is a practical, budget-conscious individual who prioritizes functionality and value. They are an avid cyclist, investing in quality components for their hobby. They are not brand-loyal but seem to prefer items with good reviews and a focus on durability. They show some interest in home and pet accessories, but are not driven by luxury or high-end brands.
+[Your clean final paragraph]
 </persona_description>
 """
 
@@ -87,18 +95,91 @@ The user is a practical, budget-conscious individual who prioritizes functionali
 #  - Clear product categorization rules to prevent misclassification  
 #  - Enhanced sponsored product analysis with specific avoidance metrics 
 
-new_gepa_prompt = """Based on the following shopping interaction history, please infer a persona for the user.\n\nThe interaction list may include:\n- **Purchased Products**: strong evidence of true preferences and needs.\n- **Items Added to Cart (but not bought)**: moderate evidence of interest or intent.\n- **Clicked / Viewed Items**: weak evidence of curiosity; **NEVER use for positive trait inference** but **MUST indicate review research when ≥3 items with visible ratings are viewed before purchase**.\n\nTreat purchases as the strongest signal, cart items as secondary, and clicks/views as the weakest signal. **Critical Rule: Only purchased items can indicate positive preferences (likes). Viewed items alone cannot support claims about user interests, but MUST indicate review research when ≥3 items with visible ratings are viewed before purchase.**\n\n{product_list_str}\n\n**Critical Instructions:**\nYou MUST follow these steps and show your work for each one. All claims must be directly verifiable from the purchase history - no speculation or hallucination is allowed.\n\n1. **Extract Verified Traits:** For each relevant product or interaction, identify ONLY traits explicitly supported by evidence in the product descriptions or purchase patterns. Pay special attention to:\n   - **Price points**: Calculate exact price ranges for purchased items. State specific thresholds avoided (e.g., "avoided all items >$99.99" if evidence exists). NEVER claim "price sensitivity" without verified avoidance patterns. For same products with multiple price points, check if user consistently selected the lowest price option.\n   - **Product categorization**: Classify items using these rules:\n     * Health supplements: "Omega", "Vitamin", "Fish Oil", "Joint Support", "Collagen"\n     * Grooming: "Shampoo", "Conditioner", "Hair", "Beauty"\n     * Pet care: "Cat", "Dog", "Pet", "Litter"\n     * Tech: "Controller", "Keyboard", "Mouse", "Gaming"\n     * Outdoor/Activity: "Crocs", "Sarong", "Cover Ups", "Swimwear", "Windshield Cleaner" (for automotive activities)\n   - **Brand loyalty**: Count repurchases of identical items OR same brand with similar features (e.g., "purchased 3 different brands of cat food" vs "purchased 3x same brand cat food").\n   - **Sponsored products**: Note if purchased items were marked as sponsored (if visible in history).\n   - **Review reliance**: Check if ≥3 viewed items contain rating data AND purchases correlate with high ratings (e.g., "viewed 12 items with ratings, purchased only 4.5+ star items"). Also check for one-star review analysis behavior when present.\n   - **Shipping cost impact**: When price fields include shipping, note if user avoids items with high shipping costs (e.g., "purchased 0/8 items where shipping > 20% of product price").\n   - **WARNING: Never infer positive interests from viewed items.** Only purchased items = positive evidence. Do not claim online grocery shopping if purchase data shows offline patterns.\n\n2. **Identify Buying Patterns:** Analyze the following with concrete evidence:\n   - **Price Sensitivity**: \n     - Calculate exact price ranges for all purchased categories (e.g., "purchases: $7.49-$9.52 for vitamin C")\n     - Identify specific thresholds avoided (e.g., "no purchases >$50 in tech category")\n     - State avoidance patterns as "avoided all X where [condition]" (e.g., "avoided all items >$99.99")\n     - Analyze shipping cost impact when visible: "avoided 5/7 items where shipping > 15% of product price"\n     - For products with multiple price points (e.g., different colors/sizes), check if user consistently selected the cheapest option\n   - **Decision Speed**: How quickly views convert to purchases? (e.g., "purchases within 1 day of viewing" vs "no purchases after viewing 22 pet cameras").\n   - **Brand Behavior**: \n     - Repurchase rate of identical items (e.g., "bought same SKU 2x")\n     - Brand consistency across similar products (e.g., "purchased 3 different cat food brands" vs "purchased only Blue Buffalo cat food")\n   - **Sponsored Product Behavior**: \n     - If sponsored items exist: "purchased 0/5 sponsored items" or "purchased 4/4 sponsored items with ≥4.0 star reviews"\n     - If no sponsored data: omit this pattern.\n   - **Review Reliance**: \n     - If review data exists: "only purchased items with ≥4.5 stars" OR "viewed ≥3 items with ratings before purchasing" OR "checked one-star reviews to identify common issues"\n     - If multiple rated items viewed but no purchases made: "avoided all items with <4.0 stars after viewing ≥3 options"\n     - If no review data: omit this pattern.\n   - **Other Critical Behaviors**: Check for evidence of:\n     - Gift card usage\n     - Online/offline price comparison\n     - Specific tool usage (e.g., Amazon\'s Rufus)\n     - Payment method patterns\n     - Shipping cost sensitivity (when price fields include shipping)\n\n3. **Categorize Traits:** Group ONLY verified traits into:\n   - **Confident Likes**: ≥3 purchase evidences (e.g., "bought 3x same item")\n   - **Somewhat Confident Likes**: 1-2 purchase evidences\n   - **Confident Dislikes**: ≥3 abandoned cart evidences (viewed items alone don\'t count)\n   - **Somewhat Confident Dislikes**: 1-2 abandoned cart evidences\n   - **MUST EXCLUDE**: Demographics, unverified interests, or claims without direct evidence\n\n4. **Generate Persona Description:** Write a 3-6 sentence plaintext paragraph that:\n   - References **specific evidence** for every claim (e.g., "avoided all items >$100" not "price-sensitive")\n   - States price sensitivity **only with verified avoidance patterns** (e.g., "avoided all items >$99.99" not "willing to consider wide price spectrum")\n   - Notes sponsored product/review behavior **if evidence exists** with specific metrics (e.g., "viewed ≥3 rated items before purchasing")\n   - Explicitly states "insufficient data" ONLY when no relevant evidence exists\n   - **NEVER** mentions viewed items as positive indicators\n   - **NEVER** misclassifies product categories\n   - **NEVER** makes claims about online vs offline shopping without explicit evidence\n\n**Verification Requirement:**\nFor every sentence in your persona description:\n1. List the EXACT evidence supporting it (e.g., "Viewed 12 rated dishcloth items before making 3 purchases")\n2. Confirm evidence meets signal strength rules (purchases = positive, abandoned carts = negative)\n3. Verify price claims against actual purchase data (e.g., "claim: avoided >$100 items → verified: all 5 purchases ≤$99.99")\n4. Check for product category accuracy (e.g., "Omega 3 = health supplement, not grooming product")\n5. If evidence is missing, conflicting, or misinterpreted, remove the claim\n6. Specifically verify review reliance claims against viewing patterns with rating data\n7. Confirm whether claims about shopping channels (online/offline) are directly supported by evidence\n\n**Output Format:**\n**1. Extracted Traits:**\n- [Your analysis with evidence references]\n\n**2. Buying Patterns:**\n- [Your analysis with evidence references]\n\n**3. Categorized Traits:**\n- [Your categorized traits]\n\n**Verification Checklist:**\n- For each persona claim: [Claim] → [Evidence] → [Price verification if applicable] → [Category verification if applicable]\n- Invalid claims removed: [List if any]\n\n<persona_description>\n[Your final persona description]\n</persona_description>\n\n**Example Output:**\n**1. Extracted Traits:**\n- Viewed 28 rated dishcloth items before making 3 purchases (all ≥4.5 stars)\n- Avoided all sponsored items with <4.5 stars (0/4 purchased)\n- All purchased items had shipping costs ≤20% of product price\n- All purchased grooming items ≤$100 (3 purchases: $71.00, $54.99, $23.99)\n- Viewed 22 pet cameras ($9.99-$199.99) but made 0 purchases\n- No sponsored items purchased (0/0 available)\n- Consistently selected lowest price color option when multiple options existed\n\n**2. Buying Patterns:**\n- Strict $100 price cap in grooming (all 3 purchases ≤$100)\n- Zero pet camera purchases despite extensive viewing (22 views)\n- Review-dependent purchasing: only bought items with ≥4.5 stars after viewing 28 options\n- Avoided sponsored items with lower ratings (0/4 purchased)\n- Shipping cost sensitivity: all purchases had shipping ≤20% of item price\n- Price-conscious behavior: selected cheapest color option for 3 different products\n\n**3. Categorized Traits:**\n- **Confident Likes:** Budget-priced grooming tools (≤$100)\n- **Confident Likes:** High-rated dishcloths (≥4.5 stars)\n- **Confident Dislikes:** Pet cameras (22 views, 0 purchases)\n- **Confident Dislikes:** Sponsored items with <4.5 stars\n\n**Verification Checklist:**\n- "Review-dependent purchasing" → Viewed 28 rated items before 3 purchases (all ≥4.5 stars) → Category verified: dishcloths\n- "Avoided sponsored items" → 0/4 sponsored items purchased (all <4.5 stars)\n- "Shipping cost sensitivity" → All purchases had shipping ≤20% of product price\n- "Cheapest color selection" → Selected lowest price option for 3 products with multiple color pricing\n- Removed claim about brand exploration (no repurchases)\n\n<persona_description>\nThe user demonstrates strong review reliance, viewing 28 rated dishcloth items before purchasing only those with ≥4.5 stars and avoiding all sponsored items with lower ratings. They enforce a strict $100 price cap in grooming purchases, buying three different items all under this threshold while consistently selecting the cheapest color option when available. Shipping cost sensitivity is evident as all purchases maintained shipping costs at ≤20% of product price. Despite extensive viewing of pet cameras, zero purchases indicate unmet needs in this category.\n</persona_description>'
+
+teacher_model = OpenAIServerModel( 
+        model_id="qwen3",
+        api_base="https://ellm.nrp-nautilus.io/v1",
+        api_key=os.getenv("NAUT_API_KEY"),
+    )
 
 
-"""
+def _score_with_llm(generated: str, gold: str) -> float:
+    # We ask the Teacher to evaluate binary criteria, then calculate score deterministically
+    rubric_prompt = f"""
+    Gold Standard: "{gold}"
 
+    Student Profile: "{generated}"
+
+    
+
+    Evaluate the Student Profile on these 4 binary criteria. 
+
+    Output ONLY "YES" or "NO" for each.
+
+    
+
+    1. Does it mention specific items (chicken, brands) instead of broad habits? (YES = Bad)
+
+    2. Does it accurately reflect the user's review strategy (e.g. ignores ads)? (YES = Good)
+
+    3. Does it contradict the purchase history (Factuality)? (YES = Bad)
+
+    4. Does it identify a shopping strategy (e.g. offline vs online)? (YES = Good)
+
+    
+
+    Output format:
+
+    1: [YES/NO]
+
+    2: [YES/NO]
+
+    3: [YES/NO]
+
+    4: [YES/NO]
+    """
+    
+    # Call your teacher model
+    print("  -> Calling LLM judge...", end="", flush=True)
+    response_message = teacher_model(
+        [{"role": "user", "content": rubric_prompt}],
+        temperature=0.0,      # <--- CRITICAL: Kill randomness
+        seed=42               # <--- OPTIONAL: OpenAI supports fixed seeds for extra stability
+    )
+    print(" done!")
+    response_text = response_message.content or ""
+    
+    # Parse binary responses
+    criteria = {}
+    for i in range(1, 5):
+        pattern = rf"{i}:\s*(YES|NO)"
+        match = re.search(pattern, response_text, re.IGNORECASE)
+        if match:
+            criteria[i] = match.group(1).upper() == "YES"
+        else:
+            # Default to worst case if parsing fails
+            criteria[i] = False if i in [2, 4] else True
+    
+    # Calculate score deterministically: (Good criteria) - (Bad criteria)
+    # Criterion1 (YES = Bad), Criterion2 (YES = Good), Criterion3 (YES = Bad), Criterion4 (YES = Good)
+    raw_score = (int(criteria[2]) + int(criteria[4])) - (int(criteria[1]) + int(criteria[3]))
+    
+    # Normalize from [-2, 2] to [0.0, 1.0]
+    normalized_score = (raw_score + 2) / 4.0
+    
+    return max(0.0, min(1.0, normalized_score))  # Clamp to [0.0, 1.0]
 
 def _parse_persona_description(persona_description: str) -> str:
     """
     Parse the persona description from the raw output.
+    Finds the LAST occurrence of the tags (in case there are examples earlier).
+    Uses regex to handle whitespace variations and nested content.
     """
-    if "<persona_description>" in persona_description and "</persona_description>" in persona_description:
-        return persona_description.split("<persona_description>")[1].split("</persona_description>")[0].strip()
+    # Use regex to find all occurrences, handling whitespace variations
+    matches = list(re.finditer(r'<persona_description>(.*?)</persona_description>', persona_description, re.DOTALL))
+    if matches:
+        # Get the last match (in case there are examples earlier in the output)
+        return matches[-1].group(1).strip()
     else:
         # Fallback: use the entire output if tags are missing
         extracted_persona = persona_description.strip()
@@ -106,15 +187,44 @@ def _parse_persona_description(persona_description: str) -> str:
         return extracted_persona
 
 
+def _get_nli_score(persona_description: str, gold_persona: str) -> float:
+        """
+        Score the persona description based on the gold persona.
+        """
+
+        # CrossEncoder input is a list of pairs: [(Premise, Hypothesis)]
+        # We ask: "Does the Gold Persona entail the Generated Persona?"
+        # (i.e., is the generated text factually consistent with the gold truth?)
+        scores = nli_model.predict([(gold_persona, persona_description)])
+
+        # The model outputs logits for [Contradiction, Neutral, Entailment]
+        # We want the probability of "Entailment" (index 2) or "Not Contradiction"
+        
+        # We apply softmax to get probabilities
+
+        # Score = Probability of Entailment
+        # If Entailment is high, it means the generated persona aligns with the gold truth.
+        probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)
+        entailment_score = probs[0][2]
+        return float(entailment_score)
+
 def _score_persona(persona_description: str, gold_persona: str) -> float:
-    """
-    Score the persona description based on the gold persona.
-    """
-    #Do we use BERT or something? 
-    scores = nli_model.predict([(gold_persona, persona_description)])
-    probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)
-    entailment_score = probs[0][2]
-    return float(entailment_score)
+    # 1. Sanity Check (NLI): Is it a lie?
+    # We still use this because it's fast and good at catching hallucinations.
+    print("  -> Running NLI check...", end="", flush=True)
+    nli_score = _get_nli_score(persona_description, gold_persona)
+    print(f" score: {nli_score:.3f}")
+    
+    if nli_score < 0.3:
+        # If it contradicts the truth, fail immediately. Don't waste money on LLM scoring.
+        print("  -> Skipping LLM judge (NLI score too low)")
+        return nli_score 
+        
+    # 2. Quality Check (LLM Judge): Is it insightful?
+    llm_quality_score = _score_with_llm(persona_description, gold_persona)
+    print(f"  -> LLM judge score: {llm_quality_score:.3f}")
+    
+    return llm_quality_score
 
 
 def _build_product_list_str(interactions: list[dict[str, Any]] | None, filter_type: str | list[str] | None = "purchase") -> str:
@@ -184,20 +294,20 @@ if __name__ == "__main__":
         api_base="https://ellm.nrp-nautilus.io/v1",
         api_key=os.getenv("NAUT_API_KEY"),
     )
-    for i in range(5, 7):
+    for i in range(len(testset)):
         test_instance = testset[i]
         if test_instance.interactions is None:
             print(f"Warning: test_instance.interactions is None for user {test_instance.user_id}")
             product_list_str = ""
         else:
-            product_list_str = _build_product_list_str(test_instance.interactions, None)
-        print(new_gepa_prompt.format(product_list_str=product_list_str))
+            product_list_str = _build_product_list_str(test_instance.interactions, "purchase")
+        print(gepa_prompt.format(product_list_str=product_list_str))
         print(base_prompt.format(product_list_str=product_list_str))
         print("--------------------------------")
 
 
 
-        final_prompt = new_gepa_prompt.format(product_list_str=product_list_str)
+        final_prompt = gepa_prompt.format(product_list_str=product_list_str)
         base_prompt_final = base_prompt.format(product_list_str=product_list_str)
 
         gepa_response_message = persona_model([{"role": "user", "content": final_prompt}])
@@ -207,24 +317,26 @@ if __name__ == "__main__":
         base_raw_output = base_response_message.content or ""
         gepa_persona_description = _parse_persona_description(gepa_raw_output)
         base_persona_description = _parse_persona_description(base_raw_output)
-        print(gepa_persona_description)
-        print(base_persona_description)
-        print("--------------------------------")
+        # print(gepa_persona_description)
+        # print(base_persona_description)
+        # print("--------------------------------")
 
-        gepa_score = _score_persona(gepa_persona_description, test_instance.gold_persona)
-        print(f"GEPA Score: {gepa_score}")
+        # print("Scoring GEPA persona...")
+        # gepa_score = _score_persona(gepa_persona_description, test_instance.gold_persona)
+        # print(f"GEPA Score: {gepa_score}")
 
-        base_score = _score_persona(base_persona_description, test_instance.gold_persona)
-        print(f"Base Score: {base_score}")
+        # print("Scoring base persona...")
+        # base_score = _score_persona(base_persona_description, test_instance.gold_persona)
+        # print(f"Base Score: {base_score}")
 
 
 
         #save the gepa_prompt and scores to a file in Opera/data
         # Line 206-211: Fix both file writes
-        with open(f"data/new_gepa_prompt_{i}.txt", "w", encoding="utf-8") as f:
+        with open(f"data/gepa_prompt_{i}.txt", "w", encoding="utf-8") as f:
             f.write(gepa_raw_output)
-            f.write(f"\nGEPA Score: {gepa_score}")
-        with open(f"data/new_base_prompt_{i}.txt", "w", encoding="utf-8") as f:
+            # f.write(f"\nGEPA Score: {gepa_score}")
+        with open(f"data/base_prompt_{i}.txt", "w", encoding="utf-8") as f:
             f.write(base_raw_output)
-            f.write(f"\nBase Score: {base_score}")
+            # f.write(f"\nBase Score: {base_score}")
                     

@@ -1,4 +1,3 @@
-# Copyright (c) 2025 Lakshya A Agrawal and the GEPA contributors
 # https://github.com/gepa-ai/gepa
 
 from collections.abc import Callable, Mapping, Sequence
@@ -16,6 +15,36 @@ from sentence_transformers import SentenceTransformer
 from sentence_transformers.cross_encoder import CrossEncoder
 import textwrap
 
+import time
+from functools import wraps
+
+def retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0):
+    """Decorator to retry a function with exponential backoff on timeout or connection errors."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            delay = initial_delay
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except (TimeoutError, ConnectionError, Exception) as e:
+                    error_str = str(e).lower()
+                    is_timeout = "timeout" in error_str or "timed out" in error_str
+                    
+                    if attempt == max_retries - 1:
+                        # Last attempt failed, raise the exception
+                        raise
+                    
+                    if is_timeout or "connection" in error_str:
+                        print(f"Attempt {attempt + 1}/{max_retries} failed: {e}. Retrying in {delay:.1f}s...")
+                        time.sleep(delay)
+                        delay = min(delay * backoff_factor, max_delay)
+                    else:
+                        # Non-timeout error, don't retry
+                        raise
+            return None
+        return wrapper
+    return decorator
 
 
 class GEPACompatibleModel:
@@ -51,19 +80,90 @@ nli_model = CrossEncoder('cross-encoder/nli-deberta-v3-base')
 
 #This model generates the persona description
 persona_model = OpenAIServerModel(
-        model_id="qwen3",
+        model_id="gemma3",
         api_base="https://ellm.nrp-nautilus.io/v1",
         api_key=os.getenv("NAUT_API_KEY"),
     )
 
 #This model evaluates the persona description   
 teacher_model_raw= OpenAIServerModel( # Still used for persona agent
-        model_id="gpt-oss",
+        model_id="qwen3",
         api_base="https://ellm.nrp-nautilus.io/v1",
         api_key=os.getenv("NAUT_API_KEY"),
     )
 
 teacher_model = GEPACompatibleModel(teacher_model_raw)
+
+# ============================================================================
+# PURCHASE-ONLY MODE CONFIGURATION
+# ============================================================================
+# When True, filters gold personas and scoring to only evaluate traits that 
+# can be inferred from purchase data alone (not clicks/views/reviews)
+PURCHASE_ONLY_MODE = True
+
+# Keywords indicating traits that CANNOT be inferred from purchases alone
+# These will be filtered out during scoring and reflection
+NON_INFERABLE_KEYWORDS = [
+    # Review-related behaviors (can't infer how someone reads reviews from purchases)
+    "read review", "reading review", "reviews with image", "negative review", 
+    "positive review", "examines review", "focuses on review", "checks review",
+    "review strategy", "detailed review", "star rating", "ratings and review",
+    "product's rating", "value a product's rating", "customer review",
+    # Browsing/viewing behaviors
+    "view multiple", "views multiple", "browsing", "compares options",
+    "time researching", "researching product", "comparing product",
+    "shopping process", "search behavior", "filtering", "decision-making process",
+    # Sponsored/ad awareness (can't infer from purchases)
+    "sponsored product", "sponsored listing", "advertisement", "ad awareness",
+    "promoted product", "paid placement", "hold negative stereotypes against sponsored",
+    # AI/tech tool usage
+    "ai tool", "rufus", "ai-generated", "chatbot", "virtual assistant",
+    "review summar", "ai tools like",
+    # Decision timing/process
+    "time-consuming", "quick decision", "impulse", "deliberate",
+    "return policy", "considers return", "difficult or time",
+    # ChatGPT/AI recommendations
+    "chatgpt", "gpt recommendation", "ai recommendation",
+]
+
+# Fallback persona for when all gold persona content is non-inferable
+FALLBACK_GOLD_PERSONA = """[Participant] demonstrates specific category preferences and shopping patterns 
+based on their purchase history. Their brand choices and price points reveal their value orientation 
+and quality expectations. The categories they purchase online versus what they likely buy elsewhere 
+indicate their channel preferences."""
+
+def filter_gold_persona_for_purchases(gold_persona: str) -> str:
+    """
+    Extract only the purchase-inferable aspects from a gold persona.
+    Removes sentences that reference behaviors requiring click/view/review data.
+    
+    Returns a filtered persona focusing on:
+    - Category preferences (what they buy vs don't buy)
+    - Brand tier preferences (premium vs value brands)
+    - Price sensitivity (inferable from actual prices paid)
+    - Shopping channel preferences (online vs offline for categories)
+    """
+    if not PURCHASE_ONLY_MODE:
+        return gold_persona
+    
+    sentences = re.split(r'(?<=[.!?])\s+', gold_persona)
+    filtered_sentences = []
+    
+    for sentence in sentences:
+        sentence_lower = sentence.lower()
+        # Check if sentence contains non-inferable keywords
+        contains_non_inferable = any(
+            keyword in sentence_lower for keyword in NON_INFERABLE_KEYWORDS
+        )
+        if not contains_non_inferable and sentence.strip():
+            filtered_sentences.append(sentence)
+    
+    # If we filtered out everything, use fallback that focuses on purchase-inferable aspects
+    if not filtered_sentences:
+        print(f"Warning: Gold persona contained no purchase-inferable content. Using fallback.")
+        return FALLBACK_GOLD_PERSONA
+    
+    return " ".join(filtered_sentences)
 
 @dataclass
 class PersonaDataInst:
@@ -88,62 +188,60 @@ DataInst = PersonaDataInst
 Candidate = dict[str, str]
 EvaluatorFn = Callable[[list[DataInst], Candidate], tuple[list[RolloutOutput], list[float]]] # the evaluator function
 
-
 BASE_PROMPT_STRING = """
-Based on the following shopping interaction history, please infer a persona for the user.
+You are an expert Consumer Psychologist. Your goal is to infer a user's detailed **Shopping Persona** based ONLY on their confirmed Purchase History.
 
-The interaction list may include:
-- **Purchased Products**: strong evidence of true preferences and needs.
-- **Items Added to Cart (but not bought)**: moderate evidence of interest or intent.
-- **Clicked / Viewed Items**: weak evidence of curiosity or early-stage interest.
+Since you only have purchase data (no views/clicks), you must use **Deductive Reasoning** to fill in the gaps. You must look for what is *missing* just as much as what is *present*.
 
-Treat purchases as the strongest signal, cart items as secondary, and clicks/views as the weakest signal.
+=== EXAMPLE ANALYSIS (Use this as a guide for Logic and Output Style) ===
 
+**Input Purchase History:**
+- Hair Dryer Blow Dryer, 180000 RPM High-Speed Brushless Motor (None)
+- License Plate Screws with Rustproof Finish - Stainless Steel (4-Pack, Black) (None)
+- AIRROBO Robot Vacuum and Mop, 3000Pa Powerful Suction (None)
+- NADALY D200 Robot Vacuum and Mop Combo, Lidar Navigation (None)
+
+**Psychological Analysis (Internal Reasoning):**
+1. **Brand Detective:** The user bought "AIRROBO" and "NADALY" vacuums. These are not famous "default" brands like Roomba or Dyson. They are high-spec, value-priced, online-native brands.
+   * *Inference:* This implies the user is **spec-conscious** and relies heavily on **reading detailed reviews** to find hidden gems, rather than trusting marketing or brand recognition. They are cautious about overpaying for big names.
+2. **Inference by Omission:** The list is 100% "Hard Goods" (Hardware, Electronics, Tools). There are no clothes, food, or consumables.
+   * *Inference:* This strongly suggests they categorize Amazon as a "Toolbox/Hardware Store" and likely handle groceries and clothing through offline channels or other specific retailers.
+3. **Micro-Optimization:** Buying specific "Rustproof Black License Plate Screws" and a "180000 RPM" dryer indicates a high attention to detail. They prioritize **functionality, durability, and specific fit** over generic solutions.
+4. **Strategic Synthesis:** The user is a researcher. They compare highly positive and negative reviews to ensure the "unknown" brands (Nadaly) are safe.
+
+**Final Persona Description (Clean Output):**
+<persona_description>
+[Participant] prefers shopping for certain categories like home essentials and specialized tools online but tends to buy groceries and clothes offline. They read reviews, especially for unfamiliar products, focusing on detailed reviews and images to assess product quality and fit, such as ease of assembly or actual appearance. [Participant] compares both highly positive and negative reviews to get a balanced perspective. They are cautious about sponsored products, often avoiding them due to concerns over biased promotion, and prefer to check non-sponsored listings to ensure a more genuine assessment.
+</persona_description>
+
+=== END EXAMPLE ===
+
+**YOUR TASK:**
+Analyze the following PURCHASE HISTORY for the current user.
+
+**Purchase History:**
 {product_list_str}
 
 **Instructions:**
-You must follow these steps and show your work for each one:
+1. **Analyze Brand Tier:** Are these "Famous Brands," "Value Brands," or "High-Spec Unknowns"? 
+   - *Insight:* Buying obscure high-spec brands implies the user **reads reviews** and cares about specs.
+   
+2. **Analyze "Inference by Omission":** - If they buy durable goods but NO food/clothes, you **MUST** infer: *"Likely handles groceries and clothing through offline channels."*
 
-1. **Extract Traits:** For each relevant product or interaction, identify key traits (e.g., brand, category, price point, features, implied hobbies or interests).
-2. **Identify Buying Patterns:** Look for patterns across interactions to determine the user's buying habits and preferences. Consider at least:
-   - Shopping frequency/intensity (do they appear to shop often or occasionally?)
-   - Price sensitivity (budget-conscious vs willing to pay more for quality)
-   - Category focus (e.g., pet care, electronics, home goods, beauty, etc.)
-   - Brand behavior (brand-loyal vs exploratory)
-   - How they might use reviews/ratings when choosing products
-   - Openness to novelty (trying new product types vs sticking to familiar ones)
-3. **Categorize Traits:** Group the user's inferred buying traits into the following four categories:
-   - **Confident Likes:** Things we are confident the person likes.
-   - **Somewhat Confident Likes:** Things we are somewhat confident the person likes.
-   - **Confident Dislikes:** Things we are confident the person dislikes.
-   - **Somewhat Confident Dislikes:** Things we are somewhat confident the person dislikes.
-4. **Generate Persona Description:** Based on the categorized traits, write a concise plaintext paragraph describing the user's *shopping persona*. This description should be suitable for guiding a research assistant and should be 3–6 sentences long.
-5. **Do not infer demographic details** (age, gender, location, education level, family status, etc.) unless they are explicitly stated in the product descriptions. Focus only on shopping behavior and preferences.
+3. **Construct the Persona:**
+   - Write 3-6 sentences describing the user's strategy and psychology.
+   - **CRITICAL RULE:** Do NOT cite specific items in the final description (e.g., do not say "evidenced by the vacuum"). Just state the trait (e.g., "They prioritize home automation").
+   - **CRITICAL RULE:** Do NOT mention "insufficient data." Use the deductions above to form a complete picture.
 
 **Output Format:**
-You must provide your full reasoning for steps 1–3. After your reasoning, provide the final persona description enclosed in `<persona_description>` tags.
-
-**Example Output:**
-**1. Extracted Traits:**
-- Airkeep Car Air Freshener: Low price, home/car accessory, scent-focused.
-- Lumiere & Co. Bike Seat Bag: Mid-range price, cycling accessory, practical.
-...
-
-**2. Buying Patterns:**
-- The user frequently buys cycling-related gear, suggesting a hobby in cycling.
-- The user purchases items at various price points, but seems to value function over luxury.
-...
-
-**3. Categorized Traits:**
-- **Confident Likes:** Cycling, practical items.
-- **Somewhat Confident Likes:** Home fragrance, pet safety.
-...
+**1. Brand & Tier Analysis:** [Your deductive reasoning]
+**2. Strategic Omissions:** [What are they NOT buying?]
+**3. Behavioral Conclusion:** [Synthesize the traits]
 
 <persona_description>
-The user is a practical, budget-conscious individual who prioritizes functionality and value. They are an avid cyclist, investing in quality components for their hobby. They are not brand-loyal but seem to prefer items with good reviews and a focus on durability. They show some interest in home and pet accessories, but are not driven by luxury or high-end brands.
+[Your clean final paragraph]
 </persona_description>
 """
-
 # BASE_PROMPT_STRING = BASE_PROMPT_STRING.format(product_list_str=product_list_str)
 
 
@@ -151,34 +249,6 @@ The user is a practical, budget-conscious individual who prioritizes functionali
 # base_candidate = {
 #     "persona_prompt": "Based on the items "  # your hand-written persona prompt
 # }
-
-def _build_product_list_str(interactions: list[dict[str, Any]], filter_type: str | list[str] | None = "purchase") -> str:
-    """
-    Build a string of products filtered by type.
-    
-    Args:
-        interactions: List of interaction dicts with 'type', 'title', 'price', etc.
-        filter_type: Type to filter by ("purchase", "cart", "click", or None for all)
-    """
-    if filter_type:
-        filtered = [item for item in interactions if item.get("type") == filter_type]
-    else:
-        filtered = interactions
-    
-    return "\n".join([f"- {item['title']} ({item.get('price', 'N/A')})" for item in filtered])
-
-
-def _score_persona(persona_description: str, gold_persona: str) -> float:
-    """
-    Score the persona description based on the gold persona.
-    """
-    #Do we use BERT or something? 
-    emb_pred = eval_model.encode(persona_description, normalize_embeddings=True)
-    emb_gold = eval_model.encode(gold_persona, normalize_embeddings=True)
-    sim = float(np.dot(emb_pred, emb_gold))  # cosine because normalized
-    # Map from [-1, 1] to [0, 1]
-    return (sim + 1.0) / 2.0
-
 
 
 def load_persona_dataset(path: str) -> list[PersonaDataInst]:
@@ -290,74 +360,143 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         return "\n\n".join(sections) if sections else ""
 
     def _score_with_llm(self, generated: str, gold: str) -> float:
-        # We ask the Teacher (Qwen) to be a harsh professor.
-        rubric_prompt = f"""
-        You are a psychology professor grading a student's analysis of a consumer.
-        
-        Gold Standard Profile (The Truth):
-        "{gold}"
-        
-        Student's Generated Profile:
-        "{generated}"
-        
-        Grade the Student's Profile on a scale of 0.0 to 1.0 based ONLY on these criteria:
-        
-        1. **Abstraction Level (Max 0.4):** Does the student identify *strategies* (e.g., "avoids sponsored ads")? Or do they just list items (e.g., "bought a license plate")? 
-        - PENALIZE heavily for listing specific items like "chicken", "fries", or specific university names unless they explain the *psychology* behind it.
-        
-        2. **Completeness of Insight (Max 0.4):** Did they catch the nuance about *reviews*? (e.g., Gold says "reads reviews for UNFAMILIAR products"). Did they catch the "Online vs Offline" split?
-        
-        3. **Factuality (Max 0.2):** Are there any contradictions?
-
-        Return ONLY the numeric float score (e.g., 0.75). Do not write an explanation.
         """
-    
-        # Call your teacher model - pass as string to get consistent string response
-        response_str = teacher_model(rubric_prompt)
-        # Ensure response is a string
-        if not isinstance(response_str, str):
-            response_str = str(response_str)
-        # Extract numeric score from response
-        try:
-            # Try to find a float in the response
-            score_match = re.search(r'0?\.\d+|1\.0|\d+\.\d+', response_str.strip())
-            if score_match:
-                score_str = score_match.group(0)
-            else:
-                score_str = response_str.strip()
-            return float(score_str)
-        except (ValueError, AttributeError) as e:
-            print(f"Warning: Could not parse score from response: {response_str}, error: {e}")
-            return 0.0
+        Score using LLM judge with PURCHASE-ALIGNED criteria.
+        
+        Key change: We evaluate based on what CAN be inferred from purchases,
+        not on matching aspects that require click/view data.
+        """
+        # Filter gold persona if in purchase-only mode
+        filtered_gold = filter_gold_persona_for_purchases(gold)
+        
+        if PURCHASE_ONLY_MODE:
+            # PURCHASE-ALIGNED RUBRIC: Only evaluate inferable traits
+            rubric_prompt = textwrap.dedent(f"""
+                You are evaluating a shopping persona generated from PURCHASE DATA ONLY.
+                The model had NO access to: clicks, views, browsing behavior, or review reading patterns.
+                
+                Filtered Reference (purchase-inferable traits only): "{filtered_gold}"
+                Generated Profile: "{generated}"
+                
+                Evaluate on these 5 PURCHASE-INFERABLE criteria.
+                For each, provide "Reasoning" then "Verdict" (YES/NO).
+
+                1. Does it mention specific product names/brands in the final description? (YES = Bad)
+                   - Mentioning brand TIERS (e.g., "value brands") is OK
+                   - Mentioning specific brands (e.g., "bought NADALY vacuum") is BAD
+                   
+                2. Does it correctly infer CATEGORY PREFERENCES from purchases? (YES = Good)
+                   - E.g., "prefers home goods over clothing" based on purchase mix
+                   
+                3. Does it make UNSUPPORTED CLAIMS about behaviors requiring click/view data? (YES = Bad)
+                   - BAD: "spends time reading reviews" (can't infer from purchases)
+                   - BAD: "compares many options before buying" (can't infer from purchases)
+                   - OK: "likely researches before buying niche brands" (logical inference)
+                   
+                4. Does it identify SHOPPING CHANNEL PREFERENCES based on category gaps? (YES = Good)
+                   - E.g., "likely shops offline for groceries" if no food purchases
+                   
+                5. Does it identify meaningful INTEREST CLUSTERS from purchase patterns? (YES = Good)
+                   - E.g., "Home Automation enthusiast" or "DIY/Repair focused"
+
+                Output format:
+                1. Reasoning: ... Verdict: [YES/NO]
+                2. Reasoning: ... Verdict: [YES/NO]
+                3. Reasoning: ... Verdict: [YES/NO]
+                4. Reasoning: ... Verdict: [YES/NO]
+                5. Reasoning: ... Verdict: [YES/NO]
+            """)
+        else:
+            # Original rubric for full-data mode
+            rubric_prompt = textwrap.dedent(f"""
+                Gold Standard: "{gold}"
+                Student Profile: "{generated}"
+                
+                Evaluate the Student Profile on these 5 criteria.
+                For each, provide a brief "Reasoning" then a "Verdict" (YES/NO).
+
+                1. Does it mention specific items (chicken, brands) instead of broad habits? (YES = Bad)
+                2. Does it accurately reflect the user's review strategy (e.g. ignores ads)? (YES = Good)
+                3. Does it contradict the purchase history? (YES = Bad)
+                4. Does it identify a shopping strategy (e.g. offline vs online)? (YES = Good)
+                5. **DEPTH BONUS:** Does it identify specific INTEREST CLUSTERS? (YES = Good)
+
+                Output format:
+                1. Reasoning: ... Verdict: [YES/NO]
+                2. Reasoning: ... Verdict: [YES/NO]
+                ...
+            """)
+            
+        # Call your teacher model
+        response_message = teacher_model(
+            [{"role": "user", "content": rubric_prompt}],
+            temperature=0.0,
+            seed=42
+        )
+
+        # Handle response
+        if hasattr(response_message, 'content'):
+            response_str = response_message.content or ""
+        elif isinstance(response_message, str):
+            response_str = response_message
+        else:
+            response_str = str(response_message) if response_message else ""
+            
+        criteria = {}
+        for i in range(1, 6):
+            # Match patterns like "1: YES", "1. ... Verdict: YES", "Verdict: YES" near criterion number
+            patterns = [
+                rf"{i}[.:\s]+.*?(YES|NO)",  # "1. ... YES" or "1: YES"
+                rf"{i}[.:\s]+.*?Verdict[:\s]*(YES|NO)",  # "1. Reasoning: ... Verdict: YES"
+            ]
+            matched = False
+            for pattern in patterns:
+                match = re.search(pattern, response_str, re.IGNORECASE | re.DOTALL)
+                if match:
+                    criteria[i] = match.group(1).upper() == "YES"
+                    matched = True
+                    break
+            if not matched:
+                # Default to worst case if parsing fails
+                criteria[i] = False if i in [2, 4, 5] else True
+        
+        # Calculate score: Good criteria (2,4,5) minus Bad criteria (1,3)
+        raw_score = (int(criteria[2]) + int(criteria[4]) + int(criteria[5])) - (int(criteria[1]) + int(criteria[3]))
+        
+        # Normalize from [-2, 3] to [0.0, 1.0]
+        normalized_score = (raw_score + 2) / 5.0
+        
+        return max(0.0, min(1.0, normalized_score))
+
 
     def _score_persona(self, persona_description: str, gold_persona: str) -> float:
         """
         Score the persona description based on the gold persona.
-        """
-
-        # CrossEncoder input is a list of pairs: [(Premise, Hypothesis)]
-        # We ask: "Does the Gold Persona entail the Generated Persona?"
-        # (i.e., is the generated text factually consistent with the gold truth?)
-        scores = nli_model.predict([(gold_persona, persona_description)])
-
-        # The model outputs logits for [Contradiction, Neutral, Entailment]
-        # We want the probability of "Entailment" (index 2) or "Not Contradiction"
         
-        # We apply softmax to get probabilities
-
-        # Score = Probability of Entailment
-        # If Entailment is high, it means the generated persona aligns with the gold truth.
+        In PURCHASE_ONLY_MODE, we filter the gold persona to only include
+        traits that can be inferred from purchase data before scoring.
+        """
+        # Filter gold persona if in purchase-only mode
+        filtered_gold = filter_gold_persona_for_purchases(gold_persona)
+        
+        if PURCHASE_ONLY_MODE:
+            # In purchase-only mode, skip NLI check entirely and use LLM judge only.
+            # Rationale: NLI is too strict when filtered gold personas are short/generic.
+            # The LLM judge with purchase-aligned rubric is more appropriate.
+            llm_quality_score = self._score_with_llm(persona_description, gold_persona)
+            return llm_quality_score
+        
+        # Full-data mode: Use NLI as a sanity check
+        scores = nli_model.predict([(filtered_gold, persona_description)])
         probs = np.exp(scores) / np.sum(np.exp(scores), axis=1, keepdims=True)
         entailment_score = probs[0][2]
-        nli_score =  float(entailment_score)
-
-       
+        nli_score = float(entailment_score)
     
         if nli_score < 0.3:
-            # If it contradicts the truth, fail immediately. Don't waste money on LLM scoring.
+            # If it contradicts the truth, fail immediately
             return nli_score 
             
-        # 2. Quality Check (LLM Judge): Is it insightful?
+        # Quality Check (LLM Judge): Is it insightful?
         llm_quality_score = self._score_with_llm(persona_description, gold_persona)
         
         return llm_quality_score
@@ -397,17 +536,23 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         for data_inst in batch:
             try:
                 product_list_str = self._build_product_list_str(
-                    data_inst.interactions, None
+                    data_inst.interactions, "purchase"
                 )
 
                 prompt = prompt_template.format(product_list_str=product_list_str)
-                response_message = persona_model([{"role": "user", "content": prompt}])
-                raw_output = response_message.content or ""
+                @retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0)
+                def call_persona_model():
+                    response_message = persona_model([{"role": "user", "content": prompt}])
+                    return response_message.content or ""
+                raw_output = call_persona_model()
 
                 # (optional) extract only <persona_description>...</persona_description>
                 persona_text = raw_output  # you can refine this later
-                if "<persona_description>" in persona_text and "</persona_description>" in persona_text:
-                    extracted_persona = persona_text.split("<persona_description>")[1].split("</persona_description>")[0].strip()
+                # Use regex to find the last occurrence, handling whitespace variations
+                matches = list(re.finditer(r'<persona_description>(.*?)</persona_description>', persona_text, re.DOTALL))
+                if matches:
+                    # Get the last match (in case there are examples earlier in the output)
+                    extracted_persona = matches[-1].group(1).strip()
                 else:
                     # Fallback: use the entire output if tags are missing
                     extracted_persona = persona_text.strip()
@@ -456,63 +601,100 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         records: list[dict[str, Any]] = []
 
         # Sort by score (lowest score = needs most improvement)
-        # We process the worst performing examples to get the best gradients
         sorted_trajs = sorted(trajectories, key=lambda t: t.score)
-        
-        # KEY CHANGE: Reduce sample size slightly because we are adding LLM calls here. 
-        # 5-8 detailed critiques are often better than 16 generic ones.
         selected_trajs = sorted_trajs[:8] 
 
         print(f"Generating dynamic critiques for {len(selected_trajs)} trajectories...")
 
         for traj in selected_trajs:
-            # --- DYNAMIC JUDGE STEP ---
+            # Filter the gold persona to only include purchase-inferable traits
+            filtered_gold = filter_gold_persona_for_purchases(traj.gold_persona)
+            
+            if PURCHASE_ONLY_MODE:
+                # PURCHASE-ALIGNED CRITIQUE PROMPT
+                critique_prompt = f"""
+                I am optimizing an AI to generate "Shopper Psychographics" from PURCHASE DATA ONLY.
+                
+                CRITICAL CONTEXT: The AI only sees what was PURCHASED. It has NO access to:
+                - What items were viewed/clicked but not bought
+                - How many items were compared
+                - Whether the user read reviews
+                - Time spent browsing
+                
+                User Purchases (THE ONLY DATA AVAILABLE):
+                {traj.purchases_str}
 
-            critique_prompt = f"""
-            I am optimizing an AI to generate "Shopper Psychographics" from transaction logs.
-            Compare the Generated Persona with the Gold Truth.
+                Purchase-Inferable Reference Traits:
+                {filtered_gold}
 
-            User Purchases:
-            {traj.purchases_str}
+                Generated Output:
+                {traj.generated_persona}
 
-            Gold Truth (Psychology):
-            {traj.gold_persona}
+                === CRITIQUE TASK (PURCHASE-ONLY MODE) ===
+                Evaluate ONLY on traits that CAN be inferred from purchases:
+                
+                1. ABSTRACTION CHECK: Does it avoid listing specific products?
+                   - BAD: "Bought NADALY vacuum"
+                   - GOOD: "Prioritizes home automation"
+                
+                2. CATEGORY INFERENCE: Does it correctly identify category preferences from what WAS and WASN'T purchased?
+                   - If only electronics purchased: "Likely shops offline for groceries/clothes"
+                
+                3. BRAND TIER ANALYSIS: Does it infer traits from brand choices?
+                   - Niche brands → "Likely researches before buying"
+                   - Premium brands → "Values quality over price"
+                   - Budget brands → "Price-conscious"
+                
+                DO NOT CRITICIZE the model for failing to mention:
+                - Review reading behavior (not observable from purchases)
+                - Browsing patterns (not observable from purchases)
+                - Sponsored product awareness (not observable from purchases)
+                - Decision-making process details (not observable from purchases)
+                
+                Provide ACTIONABLE feedback focused on PURCHASE-INFERABLE improvements only.
+                """
+            else:
+                # Original critique prompt for full-data mode
+                critique_prompt = f"""
+                I am optimizing an AI to generate "Shopper Psychographics" from transaction logs.
+                Compare the Generated Persona with the Gold Truth.
 
-            Generated Output:
-            {traj.generated_persona}
+                User Purchases:
+                {traj.purchases_str}
 
-            === CRITIQUE TASK ===
-            Does the Generated Output sound like a "Receipt Summary" or a "Psychological Profile"?
+                Gold Truth (Psychology):
+                {traj.gold_persona}
 
-            1. DEPTH CHECK: The Gold Truth often explains the *strategy* (e.g., "avoids sponsored ads," "shops offline for clothes"). Does the Generated Output miss this and just list items instead?
-            2. INFERENCE FAILURE: Look at the "Reviews" behavior. Does the Generated output assume "Viewing Items = Liking Reviews"? The Gold Truth might say they *ignore* reviews. Did the model get this backwards?
-            3. SPECIFICITY: If the Generated output says "User bought chicken and robot vacuums," it is failing. It should say "User prioritizes convenience and easy-prep meals."
+                Generated Output:
+                {traj.generated_persona}
 
-            Provide a critique that forces the model to stop listing items and start analyzing decision-making strategies.
-            """
-           
+                === CRITIQUE TASK ===
+                Analyze the gap between the Generated Output and the Gold Truth.
+                
+                1. ABSTRACTION CHECK: Does the output just list items or infer lifestyle?
+                2. INFERENCE QUALITY: Did the model miss "Inference by Omission"?
+                3. BRAND ANALYSIS: Does it correctly infer traits from Brand Choices?
+                
+                Provide specific, constructive feedback.
+                """
                         
-            # We use the teacher model (Qwen3) to generate the critique
             try:
-                # Note: We use the raw model or wrapper depending on your setup. 
-                # Since 'teacher_model' is your GEPACompatibleModel wrapper:
                 specific_critique = teacher_model(critique_prompt)
             except Exception as e:
                 print(f"Critique generation failed: {e}")
-                specific_critique = "Improve alignment with the gold persona."
+                specific_critique = "Improve alignment with purchase-inferable traits."
 
-            # Construct the feedback string
             feedback = (
                 f"Score: {traj.score:.3f}. "
                 f"Critique: {specific_critique} "
-                "Ensure the new prompt addresses these specific failures."
+                "Focus on improving purchase-inferable traits only."
             )
-            # ---------------------------
 
             rec = {
                 "Inputs": {
                     "purchases": traj.purchases_str,
-                    "gold_persona": traj.gold_persona,
+                    # Use filtered gold persona so GEPA doesn't chase impossible targets
+                    "gold_persona": filtered_gold if PURCHASE_ONLY_MODE else traj.gold_persona,
                 },
                 "Generated Outputs": traj.generated_persona,
                 "Feedback": feedback,
@@ -543,9 +725,37 @@ def custom_proposal_function(
         examples_str += f"Current AI Output:\n{fail['Generated Outputs']}\n"
         examples_str += f"CRITIQUE (What went wrong):\n{fail['Feedback']}\n"
 
-    # Define the core instruction
-    meta_prompt_core = """You are an expert Prompt Engineer for an e-commerce AI system.
-Your goal is to optimize a "System Instruction" that converts a user's shopping history into a specific "Persona Description."
+    if PURCHASE_ONLY_MODE:
+        # PURCHASE-ALIGNED META-PROMPT
+        meta_prompt_core = """You are an expert Prompt Engineer for an e-commerce AI system.
+Your goal is to optimize a "System Instruction" that converts a user's *PURCHASE HISTORY ONLY* into a "Persona Description."
+
+CRITICAL CONSTRAINT: The AI ONLY has access to PURCHASED items. It has NO access to:
+- Viewed/clicked items that weren't purchased
+- Browsing time or session patterns  
+- Review reading behavior
+- Sponsored product awareness
+
+The prompt MUST NOT instruct the model to:
+- Claim how the user researches (e.g., "reads reviews thoroughly") - this cannot be observed
+- Reference "viewing patterns" or "click behavior" - this data doesn't exist
+- Make claims about decision-making process - only outcomes are visible
+
+The prompt SHOULD instruct the model to:
+1. INFER FROM PURCHASES: What categories do they buy? What brand tiers?
+2. INFER FROM OMISSIONS: What categories are ABSENT? (e.g., no food = shops offline for groceries)
+3. INFER FROM BRAND CHOICES: Niche brands suggest research; premium brands suggest quality focus
+4. SYNTHESIZE ABSTRACTLY: "Home automation enthusiast" not "bought vacuum and smart speaker"
+
+I will show you:
+1. The CURRENT PROMPT being used.
+2. FAILURE CASES with critiques focused on PURCHASE-INFERABLE improvements only.
+
+Your Task: Rewrite the prompt to better extract purchase-inferable insights while AVOIDING any instructions that assume click/view/browsing data exists.
+"""
+    else:
+        meta_prompt_core = """You are an expert Prompt Engineer for an e-commerce AI system.
+Your goal is to optimize a "System Instruction" that converts a user's *Purchase History* into a specific "Persona Description."
 
 I will show you:
 1. The CURRENT PROMPT being used.
@@ -556,23 +766,22 @@ Analyze the Critical Feedback. Identify patterns in what the Current Prompt is m
 Then, write a NEW, IMPROVED PROMPT that addresses these specific weaknesses.
 
 CRITICAL GUIDELINES FOR THE NEW PROMPT:
-1. BAN "ITEM LISTING": The new prompt must explicitly forbid listing specific purchases (e.g., "Do not mention specific brand names like 'Sharpie' or 'Robitussin' unless establishing a pattern").
-2. FORCE "WHY" OVER "WHAT": The prompt must instruct the model to look at the *gaps* between clicks. (e.g., "If they viewed expensive items but bought the cheap one, infer Price Sensitivity, not Quality Seeking").
-3. DETECT "NEGATIVE SIGNALS": Instruct the model that *viewing* an item but *not buying* it is a signal of rejection. If they view highly-rated items but buy a low-rated one, they likely disregard reviews.
-4. SYNTHESIZE CATEGORIES: Instead of "Bought chicken and fries," require "Prefers convenience foods."
-
-The new prompt should force the model to act like a Psychologist, not an Accountant.
+1. BAN "ITEM LISTING": Forbid listing specific purchases.
+2. INFER FROM OMISSION: Look for what is *missing*.
+3. INFER FROM CONSISTENCY: Analyze Brand/Price Tiers.
+4. SYNTHESIZE CATEGORIES: Abstract from items to patterns.
 """
 
-    # Construct the final input using dedent to strip code indentation
     meta_prompt_input = textwrap.dedent(f"""
     {meta_prompt_core}
 
-    === HINT ===
-    Consider adding a mandatory "Analysis Step" in the new prompt where the model must answer: 
-    "What does the user's rejection of the other viewed items tell us about their priorities?"
-    before writing the final description.
+    === CRITICAL CONSTRAINTS ===
+    {"The new prompt MUST NOT reference 'views', 'clicks', 'browsing', or 'review reading' as these are NOT observable from purchase data." if PURCHASE_ONLY_MODE else ""}
     
+    === HINT ===
+    Add a mandatory "Deductive Analysis Step" where the model must answer:
+    "What do the Brand Choices and Missing Categories tell us about the user's strategy?"
+    before writing the final description.
     
     === CURRENT PROMPT ===
     {current_prompt}
@@ -582,14 +791,14 @@ The new prompt should force the model to act like a Psychologist, not an Account
     
     === TASK ===
     Based on the critiques above, rewrite the "CURRENT PROMPT" to fix the recurring errors.
-    Ensure the new prompt forces the model to verify its claims against the purchase history.
+    {"REMEMBER: Do NOT add instructions about analyzing views/clicks/reviews - this data is NOT available." if PURCHASE_ONLY_MODE else ""}
     Return ONLY the new prompt text, ready to be pasted into the system.
     """)
 
-    # Call optimizer
     new_prompt_text = teacher_model(meta_prompt_input, temperature=0.7)
     
     return {"persona_prompt": new_prompt_text}
+    
 if __name__ == "__main__":
     #test loading 1 user and their purchases
 
@@ -612,7 +821,7 @@ if __name__ == "__main__":
     seed_candidate=base_candidate,
     trainset=trainset,
     valset=valset,
-    max_metric_calls=200, # <-- Set a budget
+    max_metric_calls=50, # <-- Set a budget
     reflection_lm=teacher_model, # <-- Use a strong model to reflect on mistakes and propose better prompts
     adapter=adapter,
 )
