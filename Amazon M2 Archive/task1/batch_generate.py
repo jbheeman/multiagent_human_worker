@@ -20,9 +20,11 @@ from smolagents.models import OpenAIServerModel
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
+import time
+from functools import wraps
 
 #go to Amazon M2 Archive/task1/ since persona_dataset.csv is there
-os.chdir("Amazon M2 Archive/task1")
+# os.chdir("Amazon M2 Archive/task1")
 
 # Configuration
 INPUT_CSV = "persona_dataset.csv"
@@ -45,6 +47,54 @@ log_lock = Lock()
 gepa_prompt = """
 You are an expert Consumer Psychologist. Your goal is to infer a user\'s detailed **Shopping Persona** based ONLY on their confirmed Purchase History.\n\nSince you only have purchase data (no views/clicks), you must use **Deductive Reasoning** to fill in the gaps. You must look for what is *missing* just as much as what is *present*.\n\n=== EXAMPLE ANALYSIS (Use this as a guide for Logic and Output Style) ===\n\n**Input Purchase History:**\n- Hair Dryer Blow Dryer, 180000 RPM High-Speed Brushless Motor (None)\n- License Plate Screws with Rustproof Finish - Stainless Steel (4-Pack, Black) (None)\n- AIRROBO Robot Vacuum and Mop, 3000Pa Powerful Suction (None)\n- NADALY D200 Robot Vacuum and Mop Combo, Lidar Navigation (None)\n\n**Psychological Analysis (Internal Reasoning):**\n1. **Brand Detective:** The user bought "AIRROBO" and "NADALY" vacuums. These are not famous "default" brands like Roomba or Dyson. They are high-spec, value-priced, online-native brands.\n   * *Inference:* This implies the user is **spec-conscious** and relies heavily on **reading detailed reviews** to find hidden gems, rather than trusting marketing or brand recognition. They are cautious about overpaying for big names.\n2. **Inference by Omission:** The list is 100% "Hard Goods" (Hardware, Electronics, Tools). There are no clothes, food, or consumables.\n   * *Inference:* This strongly suggests they categorize Amazon as a "Toolbox/Hardware Store" and likely handle groceries and clothing through offline channels or other specific retailers.\n3. **Micro-Optimization:** Buying specific "Rustproof Black License Plate Screws" and a "180000 RPM" dryer indicates a high attention to detail. They prioritize **functionality, durability, and specific fit** over generic solutions.\n4. **Strategic Synthesis:** The user is a researcher. They compare highly positive and negative reviews to ensure the "unknown" brands (Nadaly) are safe.\n\n**Final Persona Description (Clean Output):**\n<persona_description>\n[Participant] prefers shopping for certain categories like home essentials and specialized tools online but tends to buy groceries and clothes offline. They read reviews, especially for unfamiliar products, focusing on detailed reviews and images to assess product quality and fit, such as ease of assembly or actual appearance. [Participant] compares both highly positive and negative reviews to get a balanced perspective. They are cautious about sponsored products, often avoiding them due to concerns over biased promotion, and prefer to check non-sponsored listings to ensure a more genuine assessment.\n</persona_description>\n\n=== END EXAMPLE ===\n\n**YOUR TASK:**\nAnalyze the following PURCHASE HISTORY for the current user.\n\n**Purchase History:**\n{product_list_str}\n\n**Instructions:**\n1. **Analyze Brand Tier:** Are these "Famous Brands," "Value Brands," or "High-Spec Unknowns"? \n   - *Insight:* Buying obscure high-spec brands implies the user **reads reviews** and cares about specs.\n   \n2. **Analyze "Inference by Omission":** - If they buy durable goods but NO food/clothes, you **MUST** infer: *"Likely handles groceries and clothing through offline channels."*\n\n3. **Construct the Persona:**\n   - Write 3-6 sentences describing the user\'s strategy and psychology.\n   - **CRITICAL RULE:** Do NOT cite specific items in the final description (e.g., do not say "evidenced by the vacuum"). Just state the trait (e.g., "They prioritize home automation").\n   - **CRITICAL RULE:** Do NOT mention "insufficient data." Use the deductions above to form a complete picture.\n\n**Output Format:**\n**1. Brand & Tier Analysis:** [Your deductive reasoning]\n**2. Strategic Omissions:** [What are they NOT buying?]\n**3. Behavioral Conclusion:** [Synthesize the traits]\n\n<persona_description>\n[Your clean final paragraph]\n</persona_description>
 """
+
+def retry_with_backoff(max_retries=5, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0):
+    """
+    Retry decorator that sleeps for 30s specifically for upstream connection errors.
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            delay = initial_delay
+            
+            for attempt in range(max_retries + 1): # +1 to ensure we actually try max_retries times
+                try:
+                    return func(*args, **kwargs)
+                
+                except Exception as e:
+                    error_str = str(e).lower()
+                    
+                    # 1. CHECK FOR THE "CRASH" ERROR
+                    # If the server is restarting/refusing connections, it needs a long pause.
+                    if "upstream connect error" in error_str or "connection refused" in error_str:
+                        print(f"[!] Upstream connection failure. Server might be restarting. Sleeping 30s... (Attempt {attempt+1}/{max_retries})")
+                        time.sleep(30.0) 
+                        # Reset delay after a long sleep because the server should be fresh
+                        delay = initial_delay 
+                        continue
+
+                    # 2. CHECK FOR STANDARD RATE LIMITS (429) OR TIMEOUTS
+                    is_transient = "429" in error_str or "timeout" in error_str or "rate limit" in error_str
+                    
+                    if attempt == max_retries:
+                        # If we used up all retries, raise the error so it gets logged as a failure
+                        raise e 
+                    
+                    if is_transient:
+                        print(f"API Error: {e}. Retrying in {delay:.1f}s...")
+                        time.sleep(delay)
+                        delay = min(delay * backoff_factor, max_delay)
+                    else:
+                        # If it's a real error (like "Invalid Prompt"), don't retry.
+                        raise e
+            return None
+        return wrapper
+    return decorator
+
+
+@retry_with_backoff(max_retries=10) # Increased retries since we are waiting 30s
+def safe_generate(prompt):
+    return persona_model([{"role": "user", "content": prompt}])
 
 def setup_logging():
     """Initialize logging and checkpoint directory."""
@@ -78,7 +128,7 @@ def generate_persona(product_details: str, session_id: int) -> dict:
         prompt = gepa_prompt.format(product_list_str=product_details)
         
         # Call LLM
-        response = persona_model([{"role": "user", "content": prompt}])
+        response = safe_generate(prompt)
         raw_output = response.content if hasattr(response, 'content') else str(response)
         
         # Extract persona from tags
