@@ -3,7 +3,7 @@
 # Script to run test_splits.py for each category sequentially
 # This ensures each category runs in its own process, freeing memory between runs
 
-set -e  # Exit on error
+# Don't use set -e here - we want to continue even if one category fails
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -25,15 +25,15 @@ CATEGORIES=(
     "Digital_Music"
     "Grocery_and_Gourmet_Food"
     "Sports_and_Outdoors"
-    "Home_and_Kitchen"
+    # "Home_and_Kitchen"
     "Subscription_Boxes"
     "Tools_and_Home_Improvement"
     "Pet_Supplies"
     "Video_Games"
     "Kindle_Store"
-    "Clothing_Shoes_and_Jewelry"
+    # "Clothing_Shoes_and_Jewelry"
     "Patio_Lawn_and_Garden"
-    "Unknown"
+    # "Unknown"
     "Books"
     "Automotive"
     "CDs_and_Vinyl"
@@ -70,16 +70,22 @@ for category in "${CATEGORIES[@]}"; do
     fi
     
     # Run the script for this category
+    # Set TMPDIR to current directory since /tmp might be full
     echo "[$category] Starting processing..."
-    python test_splits.py --category "$category"
+    export TMPDIR="${SCRIPT_DIR}/.tmp"
+    mkdir -p "$TMPDIR" 2>/dev/null || true
     
-    # Check exit status
-    if [ $? -eq 0 ]; then
+    # Run with error handling - don't exit script on failure
+    if python test_splits.py --category "$category"; then
         echo "[$category] ✓ Successfully completed"
     else
-        echo "[$category] ✗ Failed with error code $?"
+        EXIT_CODE=$?
+        echo "[$category] ✗ Failed with error code $EXIT_CODE"
         echo "Continuing with next category..."
     fi
+    
+    # Clean up temp files after each category to save space
+    rm -rf "${SCRIPT_DIR}/.tmp"/* 2>/dev/null || true
     
     echo ""
 done

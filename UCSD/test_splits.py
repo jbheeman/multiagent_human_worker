@@ -87,7 +87,7 @@ categories = [
 "Digital_Music",
 "Grocery_and_Gourmet_Food",
 "Sports_and_Outdoors",
-"Home_and_Kitchen",
+# "Home_and_Kitchen",
 "Subscription_Boxes",
 "Tools_and_Home_Improvement",
 "Pet_Supplies",
@@ -95,8 +95,8 @@ categories = [
 "Kindle_Store",
 "Clothing_Shoes_and_Jewelry",
 "Patio_Lawn_and_Garden",
-"Unknown",
-"Books",
+# "Unknown",
+# "Books",
 "Automotive",
 "CDs_and_Vinyl",
 "Beauty_and_Personal_Care",
@@ -174,8 +174,14 @@ def collect_reviews_for_users(review_path: str, target_users: list[str]) -> dict
         )
         
         # Read line-by-line to minimize memory usage
+        line_count = 0
         with open(review_local_path, "r", encoding="utf-8") as f:
             for line in f:
+                line_count += 1
+                # Check memory every 100k lines
+                if line_count % 100000 == 0:
+                    check_memory_and_exit_if_high()
+                
                 if not line.strip():
                     continue
                 try:
@@ -272,8 +278,14 @@ def process_category(category: str):
         )
         
         # Read line-by-line to minimize memory usage
+        line_count = 0
         with open(meta_local_path, "r", encoding="utf-8") as f:
             for line in f:
+                line_count += 1
+                # Check memory every 100k lines
+                if line_count % 100000 == 0:
+                    check_memory_and_exit_if_high()
+                
                 if not line.strip():
                     continue
                 try:
@@ -373,7 +385,23 @@ except ImportError:
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='Process Amazon review categories')
 parser.add_argument('--category', type=str, help='Process a single category (if not provided, processes all)')
+parser.add_argument('--max-memory-mb', type=int, default=6000, help='Maximum memory in MB before early exit (default: 6000)')
 args = parser.parse_args()
+
+# Memory monitoring function (defined after args so it can access args.max_memory_mb)
+def check_memory_and_exit_if_high():
+    """Check memory usage and exit if too high."""
+    if not HAS_PSUTIL:
+        return
+    try:
+        process = psutil.Process(os.getpid())
+        mem_mb = process.memory_info().rss / 1024 / 1024
+        if mem_mb > args.max_memory_mb:
+            print(f"WARNING: Memory usage ({mem_mb:.1f} MB) exceeds threshold ({args.max_memory_mb} MB)")
+            print("Exiting early to prevent OOM kill...")
+            sys.exit(1)
+    except Exception:
+        pass  # If we can't check memory, continue anyway
 
 # Determine which categories to process
 if args.category:
@@ -390,12 +418,18 @@ else:
 
 for cat in categories_to_process:
     try:
+        # Check memory before starting
+        check_memory_and_exit_if_high()
+        
         if HAS_PSUTIL:
             process = psutil.Process(os.getpid())
             mem_before = process.memory_info().rss / 1024 / 1024  # MB
-            print(f"[{cat}] Memory before: {mem_before:.1f} MB")
+            print(f"[{cat}] Memory before: {mem_before:.1f} MB (max: {args.max_memory_mb} MB)")
         
         process_category(cat)
+        
+        # Check memory after processing
+        check_memory_and_exit_if_high()
         
         if HAS_PSUTIL:
             mem_after = process.memory_info().rss / 1024 / 1024  # MB
