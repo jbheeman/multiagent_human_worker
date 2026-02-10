@@ -17,6 +17,7 @@ class MockRetailDomainEnv(Env):
         user_provider: Optional[str] = None,
         task_split: str = "test",
         task_index: Optional[int] = None,
+        persona_prompt: Optional[str] = None,
     ):
         match task_split:
             case "test":
@@ -37,5 +38,6 @@ class MockRetailDomainEnv(Env):
             user_model=user_model,
             user_provider=user_provider,
             task_index=task_index,
+            persona_prompt=persona_prompt,
         )
         self.terminate_tools = ["transfer_to_human_agents"]

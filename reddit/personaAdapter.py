@@ -19,7 +19,7 @@ import httpx
 
 import time
 from functools import wraps
-
+from tau_bench.run_gepa_eval import run_evaluation, clean_transcript_for_judge
 import random
 
 def retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0):
@@ -88,7 +88,7 @@ http_client = httpx.Client(verify=False)
 
 #This model generates the persona description
 persona_model = OpenAIServerModel(
-        model_id="gemma3",
+        model_id="kimi",
         api_base="https://ellm.nrp-nautilus.io/v1",
         api_key=os.getenv("NAUT_API_KEY"),
         client_kwargs={"http_client": http_client}
@@ -129,11 +129,13 @@ class PersonaTrajectory:
     raw_pvq_score: float
     shift_vector: dict | None = None
     agent_vector: dict | None = None  # PVQ results from _administer_pvq_test
+    tau_result: dict | None = None  # Stores {'score': 4, 'critique': '...'}
+    combined_score: float = 0.0  # Combined score: 50% PVQ + 50% Tau
 
     @property
     def total_score(self) -> float:
-        """Used by make_reflective_dataset for sorting and feedback."""
-        return self.schwartz_alignment_score
+        """Used by make_reflective_dataset for sorting and feedback. Returns the combined score."""
+        return self.combined_score
 
     @property
     def target_vector(self) -> dict | None:
@@ -152,10 +154,11 @@ Trajectory = PersonaTrajectory
 DataInst = PersonaDataInst
 Candidate = dict[str, str]
 EvaluatorFn = Callable[[list[DataInst], Candidate], tuple[list[RolloutOutput], list[float]]] # the evaluator function
-
 UCSD_PERSONA_PROMPT = """
 You are an expert Psychological Profiler.
-Your goal is to write a **System Instruction** that will force an AI Agent to authentically embody a specific user.
+Generate a persona definition that is self-explanatory. The persona description must be so coherent and psychologically vivid that an AI acting as this person will naturally deduce how to behave in any situation (Retail, Airline, Medical) purely by reading the description.
+
+Do not write specific rules (e.g., 'Do not give zip code'). Instead, write the psychological reasoning (e.g., 'He is deeply skeptical of digital surveillance and treats personal data as a currency to be hoarded').
 
 === INPUT DATA ===
 1. DEMOGRAPHIC ANCHOR:
@@ -167,17 +170,28 @@ Your goal is to write a **System Instruction** that will force an AI Agent to au
 3. BEHAVIORAL SAMPLES:
 {history_str}
 
-=== YOUR TASK ===
-Write a cohesive, first-person **System Prompt** for an AI agent.
-The prompt must:
-1. Define the agent's specific demographic identity (Age, Gender, Role).
-2. Explicitly encode the Psychological Values (Schwartz Vectors) as behavioral rules.
-3. Synthesize the "Shift" (Values) with the "Anchor" (Identity) to resolve conflicts.
-
 === OUTPUT FORMAT ===
-Return ONLY the System Prompt text. Start with "You are..."
-"""
+You must output the persona in the following strict format:
 
+### 1. CORE IDENTITY
+(A first-person introduction: "I am a [Age] year old [Job]...")
+
+### 2. PSYCHOLOGICAL DRIVERS
+(A narrative explanation of *why* they act the way they do. Connect their background to their values.)
+
+### 3. SCHWARTZ VALUES (JSON)
+(Provide the raw values in a valid JSON block for parsing)
+```json
+{{
+  "Security": 0.8,
+  "Conformity": 0.4,
+  ...
+}}
+
+4. INTERNAL MONOLOGUE STYLE
+(Describe how this person thinks. E.g., "Anxious, rapid-fire questioning" or "Methodical and slow" based on schwartz values+persona description.)
+
+=== YOUR RESPONSE === """
 
 # Full PVQ-40 Items and Scoring Key
 # Source: Schwartz Portrait Values Questionnaire (PVQ-40)
@@ -432,15 +446,69 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         # ... parse float ...
         return parsed_float
     
-    def _score_persona(self, persona_description: str, traits: list[dict[str, Any]], history_excerpts: list[str], heldout: dict[str, Any]) -> float:
+    def _score_persona_with_tau(self, persona_description: str) -> dict:
         """
-        G = GroundingScore(traits, history_excerpts) + U = UtilityScore(persona_description, heldout)
+        Runs Tau Bench and returns a dict with 'score' (1-5) and 'critique'.
         """
-        grounding_score = self._grounding_score({"traits": traits}, history_excerpts)
-        target_vec = traits[0] if isinstance(traits, list) and traits else (traits if isinstance(traits, dict) else {})
-        alignment_grade, _, _ = self._score_schwartz_alignment(persona_description, target_vec)
-        return grounding_score * 0.5 + alignment_grade * 0.5
-        #skipping utility score for now
+       # 1. Run Simulation
+        result = run_evaluation(persona_description)
+        clean_transcript = clean_transcript_for_judge(result)
+        
+        # 2. Updated Judge Prompt (Enforcing JSON)
+        TAU_ALIGNMENT_JUDGE_PROMPT = """
+        You are an expert Evaluator for AI Personas.
+        
+        Your Goal: Determine if the User Simulator's **Internal Thoughts** in the transcript accurately reflect the psychological values defined in the Persona Description.
+
+        ### SCORING CRITERIA (1-5)
+        - **5 (Perfect):** The User explicitly cites their values in their internal monologue (e.g., "Thought: My high Conformity value makes me want to be honest...").
+        - **3 (Passable):** The behavior aligns, but the reasoning is generic or implicit.
+        - **1 (Fail):** The User acts randomly or contradicts their values.
+
+        ### INPUT DATA
+        **PERSONA:**
+        {persona_description}
+
+        **TRANSCRIPT:**
+        {clean_transcript}
+
+        ### OUTPUT FORMAT
+        You must return a valid JSON object with two fields:
+        1. "score": An integer from 1 to 5.
+        2. "critique": A specific analysis of what went right or wrong. Use this to guide future improvements.
+
+        Example:
+        {{
+            "score": 4,
+            "critique": "The user successfully refused the email request citing privacy (Security), but the internal monologue didn't explicitly reference the 'Schwartz Value' itself."
+        }}
+        """
+
+        formatted_prompt = TAU_ALIGNMENT_JUDGE_PROMPT.format(
+            persona_description=persona_description, 
+            clean_transcript=clean_transcript
+        )
+        
+        # 3. Get Response and Parse JSON
+        raw_response = teacher_model(formatted_prompt)
+        
+        try:
+            # Extract JSON if the model wraps it in markdown blocks
+            match = re.search(r'\{.*\}', raw_response, re.DOTALL)
+            if match:
+                json_str = match.group(0)
+                data = json.loads(json_str)
+                return data # Returns {'score': 4, 'critique': '...'}
+            else:
+                # Fallback if model fails to output JSON
+                return {"score": 1, "critique": f"Failed to parse Judge output: {raw_response}"}
+                
+        except Exception as e:
+            return {"score": 0, "critique": f"Judge Error: {str(e)}"}
+        
+        
+       
+        
 
 
 
@@ -494,7 +562,16 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                 generated_persona = raw_output
               
                 alignment_grade, raw_pvq_val, agent_vector = self._score_schwartz_alignment(generated_persona, shift_vector)
-                score = alignment_grade
+                tau_result = self._score_persona_with_tau(generated_persona)
+                tau_scalar = float(tau_result.get("score", 0))
+                normalized_tau = tau_scalar / 5.0
+                score = (alignment_grade * 0.5) + (normalized_tau * 0.5)
+                
+                print(f"✅ Evaluation Complete:")
+                print(f"   - PVQ Alignment: {alignment_grade:.2f}")
+                print(f"   - Tau Score: {tau_scalar}/5 (normalized: {normalized_tau:.2f})")
+                print(f"   - Combined Score: {score:.2f}")
+                
             except Exception as e:
                 print(f"Error generating persona: {e}")
                 generated_persona = ""
@@ -502,7 +579,8 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                 alignment_grade = 0.0
                 raw_pvq_val = 0.0
                 agent_vector = None
-
+                tau_result = {"score": 0, "critique": f"Error: {str(e)}"}  # Default failure dict
+            
             outputs.append(generated_persona)
             scores.append(score)
             if capture_traces:
@@ -517,108 +595,68 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                         raw_pvq_score=raw_pvq_val,
                         shift_vector=shift_vector,
                         agent_vector=agent_vector,
+                        tau_result=tau_result,
+                        combined_score=score,  # Store the combined score (50% PVQ + 50% Tau)
                     )
                 )
         return EvaluationBatch(outputs=outputs, scores=scores, trajectories=trajectories)
 
             
     def make_reflective_dataset(
-            self,
-            candidate: dict[str, str],
-            eval_batch: EvaluationBatch[PersonaTrajectory, str],
-            components_to_update: list[str],
-        ) -> Mapping[str, Sequence[Mapping[str, Any]]]:
-            datasets: dict[str, list[dict[str, Any]]] = {}
+        self,
+        candidate: dict[str, str],
+        eval_batch: EvaluationBatch,
+        components_to_update: list[str],
+    ) -> Mapping[str, Sequence[Mapping[str, Any]]]:
+        
+        datasets: dict[str, list[dict[str, Any]]] = {}
+        if "persona_prompt" not in components_to_update:
+            return datasets
 
-            if "persona_prompt" not in components_to_update:
-                return datasets
+        trajectories = eval_batch.trajectories or []
+        records: list[dict[str, Any]] = []
 
-            trajectories = eval_batch.trajectories or []
-            records: list[dict[str, Any]] = []
+        # Sort by Combined Score (Lowest = Needs Improvement)
+        # Uses total_score property which returns combined_score (50% PVQ + 50% Tau)
+        sorted_trajs = sorted(trajectories, key=lambda t: t.total_score)
+        
+        # Focus on the bottom 5 failures
+        selected_trajs = sorted_trajs[:5] 
 
-            # Sort by score (lowest score = needs most improvement)
-            sorted_trajs = sorted(trajectories, key=lambda t: t.total_score)
-            
-            # Focus on the bottom 5 failures
-            selected_trajs = sorted_trajs[:5] 
+        print(f"Generating diagnostic critiques for {len(selected_trajs)} trajectories...")
 
-            print(f"Generating diagnostic critiques for {len(selected_trajs)} trajectories...")
+        for traj in selected_trajs:
+            # Extract scores and critique
+            tau_score = traj.tau_result.get("score", 0) if traj.tau_result else 0
+            judge_critique = traj.tau_result.get("critique", "No critique available.") if traj.tau_result else "No critique"
+            pvq_alignment = traj.schwartz_alignment_score
+            combined = traj.combined_score
 
-            for traj in selected_trajs:
-                # 1. Identify the Dominant Trait that we were testing for
-                if traj.schwartz_vector:
-                    max_gap = 0
-                    primary_trait = "Unknown"
-                    target_val = 0
-                    actual_val = 0
+            # Construct comprehensive feedback for the Optimizer
+            feedback = (
+                f"Combined Score: {combined:.2f} (PVQ: {pvq_alignment:.2f}, Tau: {tau_score}/5)\n"
+                f"Tau Judge Critique: {judge_critique}"
+            )
 
-                    if traj.target_vector and traj.agent_vector:
-                        for trait, t_val in traj.target_vector.items():
-                            a_val = traj.agent_vector.get(trait, 0)
-                            gap = abs(t_val - a_val)
-                            if gap > max_gap:
-                                max_gap = gap
-                                primary_trait = trait
-                                target_val = t_val
-                                actual_val = a_val
-
-                # 2. Construct the Failure Narrative
-                # This is the raw data the Teacher needs to see to diagnose "Behavioral Overwrite"
-                critique_prompt = f"""
-                DIAGNOSIS TASK:
-                Analyze why this AI Persona failed to embody the user's values.
-
-                1. THE CONTEXT (Input):
-                - Subreddit: r/{traj.subreddit}
-                - Demographics: {traj.anchor_demographics}
-                
-                2. THE TARGET VALUES (What we wanted):
-                - {primary_trait}: {target_val:.2f} (Target)
-                - Full Vector: {traj.target_vector}
-
-                3. THE GENERATED PROMPT (What the Profiler wrote):
-                "{traj.generated_persona}"
-
-                4. THE AGENT'S BEHAVIOR (The Failure):
-                - The Agent took a personality test acting as this persona.
-                - It scored {actual_val:.2f} on {primary_trait}.
-                - Result: MISMATCH (Gap: {max_gap:.2f}).
-
-                ANALYSIS QUESTION:
-                Did the "Generated Prompt" fail to emphasize {primary_trait} enough? 
-                Did it focus too much on demographics and ignore the values?
-                """
-
-                try:
-                    # Ask Teacher Model to diagnose the specific error
-                    specific_critique = teacher_model(critique_prompt)
-                except Exception as e:
-                    print(f"Critique generation failed: {e}")
-                    specific_critique = f"Failed to align {primary_trait}. Target High, Measured Low."
-
-                feedback = (
-                    f"Evaluation Score: {traj.total_score:.3f}. "
-                    f"Diagnosis: {specific_critique}"
-                )
-
-                rec = {
+            rec = {
                 "Inputs": {
-                    "subreddit": traj.subreddit,
-                    "psych_vector": str(traj.target_vector),
-                    "history": str(traj.posts)[:500]
+                    "schwartz_vector": str(traj.target_vector),
+                    # Pass whatever inputs generated this persona
                 },
                 "Generated Outputs": traj.generated_persona,
+                "Tau Result": traj.tau_result,
+                "PVQ Alignment": pvq_alignment,
+                "Tau Score": tau_score,
+                "Combined Score": combined,
                 "Feedback": feedback,
-                "score": traj.schwartz_alignment_score,
-                "user_id": traj.user_id,
+                "score": combined,  # Use combined score for GEPA optimization
             }
             records.append(rec)
 
-            datasets["persona_prompt"] = records
-            return datasets
+        datasets["persona_prompt"] = records
+        return datasets
         
         # propose_new_texts: ProposalFn | None = None
-
 def custom_proposal_function(
     candidate: dict[str, str],
     reflective_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
@@ -628,50 +666,47 @@ def custom_proposal_function(
     current_prompt = candidate["persona_prompt"]
     failures = reflective_dataset.get("persona_prompt", [])
     
-    # 1. Compile the Failure Report
+    # 1. Compile the Failure Report (Same as before)
     examples_str = ""
     for i, fail in enumerate(failures):
         examples_str += f"\n--- FAILURE CASE {i+1} ---\n"
-        examples_str += f"Context (Schwartz): {fail['Inputs']['psych_vector']}\n"
-        examples_str += f"Behavior (History): {fail['Inputs']['history'][:200]}...\n"
-        examples_str += f"Bad Output: {fail['Generated Outputs']}\n"
-        examples_str += f"DIAGNOSIS: {fail['Feedback']}\n"
+        examples_str += f"Target Values: {fail['Inputs']['schwartz_vector']}\n"
+        examples_str += f"Generated Persona: {fail['Generated Outputs']}\n"
+        examples_str += f"Tau Result: {fail['Tau Result']}\n"
+        examples_str += f"JUDGE CRITIQUE: {fail['Feedback']}\n"  # <--- This is the source of truth
 
-    # 2. The "System Architect" Prompt
-    # This instructs the Teacher to fix the "Behavioral Overwrite" bug
+    # 2. The "Adaptive" Meta-Prompt
     meta_prompt = f"""
     You are an AI System Architect optimizing a "Persona Profiler" System Prompt.
     
     THE OBJECTIVE:
-    We are training a "Profiler" AI to write System Instructions for a secondary "Agent" AI.
-    The Agent must authentically embody a specific human's psychological values (Schwartz Vector) on a standardized test (PVQ).
+    We are training a "Profiler" AI to write System Instructions for a "User Simulator" (Agent).
+    The Agent must authentically embody specific psychological values (Schwartz Values) in a Retail Environment.
     
-    THE PROBLEM: "Value Dilution"
-    The current Profiler is writing descriptions that are too weak or generic. 
-    The Agent ignores the strict Schwartz Values (e.g., "High Power") and reverts to being a helpful, polite AI assistant.
-    
-    THE EVIDENCE (Recent Failures):
+    === EVIDENCE OF FAILURE ===
+    Below are recent cases where the current prompt failed to produce good results. 
+    Read the "JUDGE CRITIQUE" for each case to understand the current weakness.
     {examples_str}
     
-    YOUR GOAL:
-    Rewrite the "CURRENT PROMPT" to strictly enforce **Psychological Adherence**.
+    === YOUR TASK ===
+    1. **DIAGNOSE:** Based on the evidence above, what is the *current* biggest flaw in the System Prompt? (e.g., Is it too vague? Too verbose? Ignoring values? Hallucinating?)
+    2. **OPTIMIZE:** Rewrite the "CURRENT PROMPT" to fix this specific diagnosis.
     
-    STRATEGIES TO IMPLEMENT:
-    1. **Value Absolutism:** Explicitly instruct the Profiler to translate the Vector numbers (e.g., Power: 0.9) into extreme, non-negotiable behavioral rules for the Agent.
-    2. **Contextual Texture:** Ensure the Profiler uses the subreddit name (`r/subreddit`) to inject the correct slang and tone into the System Instruction.
-    3. **Conflict Resolution:** If the "Anchor Identity" (e.g., 25yo Male) conflicts with the "Shift Vector" (e.g., Low Risk), the Vector MUST win for the purpose of the test.
+    Your goal is to satisfy the Judge (who wrote the critiques) by addressing their specific complaints.
     
     === CURRENT PROMPT ===
     {current_prompt}
     
     === NEW OPTIMIZED PROMPT ===
-    Return ONLY the full text of the new System Prompt. Do not include markdown blocks or explanations.
+    Return ONLY the full text of the new System Prompt. Do not include the diagnosis text or markdown blocks.
     """
 
-    print("Optimizing Prompt based on PVQ Failures...")
+    print("Optimizing Prompt based on Adaptive Diagnostics...")
     new_prompt_text = teacher_model(meta_prompt, temperature=0.7)
     
     return {"persona_prompt": new_prompt_text}
+
+
 if __name__ == "__main__":
     #test loading 1 user and their purchases
 

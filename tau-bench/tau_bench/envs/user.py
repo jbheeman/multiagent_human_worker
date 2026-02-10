@@ -141,16 +141,16 @@ class ReactUserSimulationEnv(LLMUserSimulationEnv):
     def __init__(self, model: str, provider: str, persona_prompt: str = "", temperature: float = 0.7, seed: int | None = None, knobs: dict | None = None) -> None:
         self.persona_prompt = persona_prompt or ""
         # Sample knobs if not provided (for testing variance)
-        if knobs is None:
-            # Default values - you can parse these from persona later
-            default_values = {
-                "Security": 0.5,
-                "Conformity": 0.5,
-                "Self-Direction": 0.5,
-            }
-            self.knobs = sample_knobs(default_values)
-        else:
-            self.knobs = knobs
+        # if knobs is None:
+        #     # Default values - you can parse these from persona later
+        #     default_values = {
+        #         "Security": 0.5,
+        #         "Conformity": 0.5,
+        #         "Self-Direction": 0.5,
+        #     }
+        #     self.knobs = sample_knobs(default_values)
+        # else:
+        #     self.knobs = knobs
         super().__init__(model=model, provider=provider, temperature=temperature)
 
 
@@ -160,7 +160,7 @@ class ReactUserSimulationEnv(LLMUserSimulationEnv):
         persona_display = f"\n\nYOU ARE THIS PERSON:\n{self.persona_prompt}\n" if self.persona_prompt else ""
 
         # Build behavioral knobs display
-        knobs_display = self._build_knobs_instructions()
+        # knobs_display = self._build_knobs_instructions()
 
         return f"""You are simulating a real user chatting with an assistant.
 
@@ -170,7 +170,6 @@ PRIVATE STYLE SETTINGS (do not reveal these settings):
 
 {instruction_display}
 
-{knobs_display}
 
 Hard rules:
 - Never mention: instruction, persona prompt, benchmark, ground truth, policy, tools, system, or “as an AI”.
@@ -275,6 +274,19 @@ Remember: Start with {{ and output ONLY the JSON object."""
         message = res.choices[0].message
         self.messages.append(message.model_dump())
         self.total_cost = res._hidden_params["response_cost"]
+        
+        # Debug: Check if message content is None
+        if message.content is None:
+            print(f"DEBUG: LLM returned None content. Message object: {message}")
+            print(f"DEBUG: Full response: {res}")
+            
+            # Try to get content from reasoning field if available
+            if hasattr(message, 'provider_specific_fields') and message.provider_specific_fields:
+                reasoning = message.provider_specific_fields.get('reasoning')
+                if reasoning:
+                    print(f"DEBUG: Found reasoning field: {reasoning}")
+                    return self.parse_response(reasoning)
+        
         return self.parse_response(message.content)
 
     def reset(self, instruction: Optional[str] = None) -> str:
@@ -292,6 +304,10 @@ Remember: Start with {{ and output ONLY the JSON object."""
         Extract only the user message from JSON output.
         This prevents internal reasoning from leaking to the agent.
         """
+        if response is None:
+            print("WARNING: Received None response from LLM")
+            return "I need a moment to think about that."
+        
         response = response.strip()
         
         # Remove markdown code blocks if present
@@ -528,6 +544,7 @@ def load_user(
     user_strategy: Union[str, UserStrategy],
     model: Optional[str] = "gpt-4o",
     provider: Optional[str] = None,
+    persona_prompt: Optional[str] = None,
 ) -> BaseUserSimulationEnv:
     if isinstance(user_strategy, str):
         user_strategy = UserStrategy(user_strategy)
@@ -544,7 +561,7 @@ def load_user(
             raise ValueError("React user strategy requires a model")
         if provider is None:
             raise ValueError("React user strategy requires a model provider")
-        return ReactUserSimulationEnv(model=model, provider=provider, persona_prompt=PERSONA_PROMPT)
+        return ReactUserSimulationEnv(model=model, provider=provider, persona_prompt=persona_prompt)
     elif user_strategy == UserStrategy.VERIFY:
         if model is None:
             raise ValueError("Verify user strategy requires a model")

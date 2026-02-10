@@ -6,7 +6,7 @@ setup(
     name="tau_bench",
     version="0.1.0",
     description="The Tau-Bench package",
-    long_description=open("README.md").read(),
+    long_description=open("README.md", encoding="utf-8").read(),
     packages=find_packages(),
     include_package_data=True,
     install_requires=[

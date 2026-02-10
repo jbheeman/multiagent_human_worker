@@ -53,6 +53,7 @@ class Env(object):
         user_model: str,
         user_provider: Optional[str] = None,
         task_index: Optional[int] = None,
+        persona_prompt: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.data_load_func = data_load_func
@@ -71,7 +72,7 @@ class Env(object):
         self.wiki = wiki
         self.rules = rules
         self.user = load_user(
-            user_strategy=user_strategy, model=user_model, provider=user_provider
+            user_strategy=user_strategy, model=user_model, provider=user_provider, persona_prompt=persona_prompt
         )
         self.actions: List[Action] = []
 
