@@ -2,7 +2,7 @@
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from random import random
+import random
 from typing import Any, Generic, Protocol, TypeVar
 import json
 import re
@@ -459,7 +459,7 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                 {"role": "user", "content": user_prompt}
             ])
 
-            print(f"PVQ Response: {response}")
+            # print(f"PVQ Response: {response}")
             
             # --- D. Parsing ---
             # Robust JSON extraction
@@ -630,6 +630,7 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                 if schwartz_vector:
                     calibrated_vector = self.calibrate_psych_vector(schwartz_vector)
                     psych_vector_str = str(calibrated_vector)
+                    data_inst.schwartz_vector = calibrated_vector
                 prompt = prompt_template.format(history_str=history_str, psych_vector_str=psych_vector_str)
                 @retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0)
                 def call_persona_model():
@@ -638,7 +639,7 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                 raw_output = call_persona_model()
                 traits, persona_text = self.parse_persona_response(raw_output)
                 grounding_score = self._grounding_score({"traits": traits}, [h.get("review_excerpt", "") for h in data_inst.history])
-                alignment_grade, raw_pvq_val = self._score_schwartz_alignment(persona_text, data_inst.schwartz_vector)
+                alignment_grade, raw_pvq_val = self._score_schwartz_alignment(persona_text, calibrated_vector)
                 score = grounding_score * 0.5 + alignment_grade * 0.5            
             except Exception as e:
                 print(f"Error generating persona: {e}")
@@ -660,7 +661,7 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                         heldout_item_str=heldout_str,
                         traits_json={"traits": traits, "persona_description": persona_text},
                         grounding_score=grounding_score,
-                        schwartz_vector=schwartz_vector,
+                        schwartz_vector=calibrated_vector,
                         schwartz_alignment_score=alignment_grade,
                         raw_pvq_score=raw_pvq_val,
                         total_score=score,
@@ -825,6 +826,7 @@ if __name__ == "__main__":
     trainset = load_persona_dataset("traininggdelt_enriched.jsonl")
     random.seed(42) # Fixed seed for reproducibility
     random.shuffle(trainset)
+    trainset = trainset[:50]
     # print(trainset[0].history[0].get("rating"))
     # print(trainset[1].history[0].get("review_excerpt"))
     # print(trainset[0].schwartz_vector)
@@ -875,7 +877,7 @@ if __name__ == "__main__":
     seed_candidate=base_candidate,
     trainset=trainset,
     valset=valset,
-    max_metric_calls=50, # <-- Set a budget
+    max_metric_calls=600, # <-- Set a budget
     reflection_lm=teacher_model, # <-- Use a strong model to reflect on mistakes and propose better prompts
     adapter=adapter,
 )
@@ -883,6 +885,9 @@ if __name__ == "__main__":
     best = gepa_result.best_candidate
     print("\n=== Best persona prompt ===")
     print(best)
+    best_persona_file = open("best_persona_prompt.txt", "w")
+    best_persona_file.write(str(best))
+    best_persona_file.close()
 
 
     # batch = trainset[:2]

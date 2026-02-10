@@ -17,6 +17,7 @@ import textwrap
 
 import time
 from functools import wraps
+import signal
 
 def retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0):
     """Decorator to retry a function with exponential backoff on timeout or connection errors."""
@@ -298,6 +299,20 @@ def _normalize(text: str) -> str:
     text = re.sub(r"\s+", " ", text)
     return text
 class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
+    # Class variable to track best prompt file
+    BEST_PROMPT_FILE = "best_persona_prompt.txt"
+    
+    def _save_candidate(self, candidate: dict[str, str]):
+        """Save the current candidate prompt to file (overwrites each time)."""
+        prompt_text = candidate.get("persona_prompt", "")
+        try:
+            with open(self.BEST_PROMPT_FILE, "w") as f:
+                f.write(f"# Current Best Persona Prompt\n")
+                f.write("# Auto-saved during GEPA optimization (overwrites after each iteration)\n\n")
+                f.write(prompt_text)
+        except Exception as e:
+            print(f"[Warning] Failed to save candidate: {e}")
+    
     def _build_product_list_str(self, history: list[dict[str, Any]]) -> str:
         """
         Build a string of reviews, titles, and ratings.
@@ -568,10 +583,15 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         candidate: dict[str, str],
         capture_traces: bool = False,
     ) -> EvaluationBatch[PersonaTrajectory, str]:
+        # Save the current candidate (GEPA updates this after each iteration)
+        self._save_candidate(candidate)
+        
         outputs: list[str] = []
         scores: list[float] = []
         trajectories: list[PersonaTrajectory] | None = [] if capture_traces else None
 
+        print(f"[GEPA] Evaluating candidate on batch of {len(batch)} examples")
+        
         # use candidate["persona_prompt"], not hard-coded BASE_PROMPT_STRING
         prompt_template = candidate["persona_prompt"]
         for data_inst in batch:
@@ -857,18 +877,18 @@ if __name__ == "__main__":
     # heldout_str = adapter.build_heldout_str(trainset[0].heldout)
     # print("Heldout str:", heldout_str)
     # print(product_list_str)
-    # prompt = UCSD_PERSONA_PROMPT.format(history_str=product_list_str)
-    # response_message = persona_model([{"role": "user", "content": prompt}])
+    prompt = UCSD_PERSONA_PROMPT.format(history_str=product_list_str)
+    response_message = persona_model([{"role": "user", "content": prompt}])
     # print(response_message.content)
     #parse for json
-    # traits, persona_description = adapter.parse_persona_response(response_message.content)
-    # print(traits)
-    # print(persona_description)
-    # output_json = {"traits": traits}
-    # history_excerpts = [item.get('review_excerpt', '') for item in trainset[0].history]
+    traits, persona_description = adapter.parse_persona_response(response_message.content)
+    print(traits)
+    print(persona_description)
+    output_json = {"traits": traits}
+    history_excerpts = [item.get('review_excerpt', '') for item in trainset[0].history]
 
 
-    # grounding_score = adapter._grounding_score(output_json, history_excerpts )
+    grounding_score = adapter._grounding_score(output_json, history_excerpts )
     # print("grounding_score:", grounding_score)
 
     # alignment_score  = adapter.paragraph_to_trait_alignment_score(persona_description, traits)
@@ -883,18 +903,36 @@ if __name__ == "__main__":
 
 #     adapter.propose_new_texts = custom_proposal_function
 
-    gepa_result = gepa.optimize(
-    seed_candidate=base_candidate,
-    trainset=trainset,
-    valset=valset,
-    max_metric_calls=50, # <-- Set a budget
-    reflection_lm=teacher_model, # <-- Use a strong model to reflect on mistakes and propose better prompts
-    adapter=adapter,
-)
-
-    best = gepa_result.best_candidate
-    print("\n=== Best persona prompt ===")
-    print(best)
+    # Save initial seed prompt before optimization starts
+    adapter._save_candidate(base_candidate)
+    print(f"[Saved] Initial seed prompt to {adapter.BEST_PROMPT_FILE}")
+    
+    try:
+        gepa_result = gepa.optimize(
+            seed_candidate=base_candidate,
+            trainset=trainset,
+            valset=valset,
+            max_metric_calls=50, # <-- Set a budget
+            reflection_lm=teacher_model, # <-- Use a strong model to reflect on mistakes and propose better prompts
+            adapter=adapter,
+        )
+        
+        best = gepa_result.best_candidate
+        print("\n=== Best persona prompt ===")
+        print(best)
+        
+        # Save final best prompt (adapter._save_candidate is also called during optimization)
+        adapter._save_candidate(best)
+        print(f"\n[Saved] Final best prompt to {adapter.BEST_PROMPT_FILE}")
+        
+    except KeyboardInterrupt:
+        print(f"\n\n[KeyboardInterrupt] Optimization interrupted.")
+        print(f"[Note] Current best prompt saved in {adapter.BEST_PROMPT_FILE}")
+        raise
+    except Exception as e:
+        print(f"\n[Error] {e}")
+        print(f"[Note] Last candidate may be in {adapter.BEST_PROMPT_FILE}")
+        raise
 
     # batch = trainset[:2]
     # eval_batch = adapter.evaluate(batch, base_candidate, capture_traces=True)

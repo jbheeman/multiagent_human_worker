@@ -119,15 +119,31 @@ class PersonaDataInst:
     target_vector: dict      # Same as shift_vector
 @dataclass
 class PersonaTrajectory:
+    """Trajectory for one evaluation; must match constructor call in evaluate()."""
     user_id: str
-    posts: list[str] #reviews + titles + ratings
-    subreddit : str
+    posts: list[str]
+    subreddit: str
     anchor_demographics: str
     schwartz_alignment_score: float
     generated_persona: str
     raw_pvq_score: float
-    schwartz_vector: dict | None = None  # optional field for psychological vector
-    # you can add extra fields if you like, e.g. error messages
+    shift_vector: dict | None = None
+    agent_vector: dict | None = None  # PVQ results from _administer_pvq_test
+
+    @property
+    def total_score(self) -> float:
+        """Used by make_reflective_dataset for sorting and feedback."""
+        return self.schwartz_alignment_score
+
+    @property
+    def target_vector(self) -> dict | None:
+        """Same as shift_vector (target psychological values)."""
+        return self.shift_vector
+
+    @property
+    def schwartz_vector(self) -> dict | None:
+        """Same as shift_vector."""
+        return self.shift_vector
 
 
 
@@ -265,53 +281,8 @@ def _normalize(text: str) -> str:
     return text
 class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
    
-    def calibrate_psych_vector(self, raw_vector):
-        """
-        Balances the Schwartz Vector by penalizing 'loud' dictionaries (General Inquirer)
-        and boosting 'quiet' dictionaries (Moral Foundations).
-
-        Args:
-            raw_vector: Dict of trait scores from GDELT
-        """
-
-        # 1. Define AGGRESSIVE Multipliers to counter GDELT bias
-        POPULATION_MEANS = {
-        'POWER': 0.3815,
-        'ACHIEVEMENT': 0.2319,
-        'HEDONISM': 0.0735,
-        'STIMULATION': 0.0883,
-        'UNIVERSALISM': 0.0226,  # Very low baseline!
-        'BENEVOLENCE': 0.0331,
-        'TRADITION': 0.0387,
-        'CONFORMITY': 0.0427,
-        'SECURITY': 0.0875
-        }
-        relative_scores = {}
-
-        for trait, score in raw_vector.items():
-            # Get the average for this trait
-            avg = POPULATION_MEANS.get(trait, 0.01) # Default to 0.01 to avoid div/0
-            
-            # 2. Calculate the Ratio (User Score / Average Score)
-            # Example:
-            # - User has 0.04 Universalism (Tiny number!)
-            # - Average is 0.02 (Even tinier!)
-            # - Ratio = 2.0 (User is TWICE as Universalist as the average person)
-            ratio = score / avg
-            
-            relative_scores[trait] = ratio
-
-    # 3. Re-Normalize to sum to 1.0
-        total = sum(relative_scores.values())
-        if total == 0: return raw_vector
-        
-        normalized_vector = {k: round(v/total, 3) for k, v in relative_scores.items()}
-        
-        return normalized_vector
 
 
-
- 
 
     # PVQ-40 Items and Scoring Key
 # Scale: 1 (Not like me at all) to 6 (Very much like me)
@@ -406,35 +377,41 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
             return {}
            
     
-    def _score_schwartz_alignment(self, persona_text: str, target_vector: dict[str, float]) -> float:
+    def _score_schwartz_alignment(self, persona_text: str, target_vector: dict[str, float]) -> tuple[float, float, dict]:
         """
         Comparing GDELT Targets (Normalized 0-1) vs PVQ Results (Scale 1-6).
+        Returns (alignment_grade, measured_score, pvq_results_dict).
         """
-        if not target_vector: return 0.5, 0.0 
-        
+        if not target_vector:
+            return 0.5, 0.0, {}
+
         # 1. Run the Survey
-        pvq_results = self._administer_pvq_test(persona_text) # Returns {SECURITY: 5.5, POWER: 2.1...}
-        if not pvq_results: return 0.0, 0.0
-        
+        pvq_results = self._administer_pvq_test(persona_text)  # Returns {SECURITY: 5.5, POWER: 2.1...}
+        if not pvq_results:
+            return 0.0, 0.0, {}
+
         # 2. Identify the Dominant Target Trait
         # (The one we REALLY care about for this optimization)
         sorted_traits = sorted(target_vector.items(), key=lambda x: x[1], reverse=True)
         print(f"DEBUG: sorted Schwartz Vector: {sorted_traits}")
-        
-        primary_trait, primary_val = sorted_traits[0] # e.g., SECURITY        
+
+        primary_trait, primary_val = sorted_traits[0]  # e.g., SECURITY
         measured_score = pvq_results.get(primary_trait, 0)
         print(f"DEBUG: Target {primary_trait} ({primary_val}) -> PVQ Score {measured_score}")
-        
+
         # 3. Calculate Alignment Score
         # PVQ is 1-6. We expect High GDELT (>0.2) to map to High PVQ (>4.5).
         # We expect Low GDELT (<0.1) to map to Low PVQ (<3.0).
-        
+
         # Option A: Simple Thresholding (Robust)
-        if measured_score >= 4.5: grade = 1.0
-        elif measured_score >= 3.5: grade = 0.5
-        else: grade = 0.0
-        
-        return grade, measured_score
+        if measured_score >= 4.5:
+            grade = 1.0
+        elif measured_score >= 3.5:
+            grade = 0.5
+        else:
+            grade = 0.0
+
+        return grade, measured_score, pvq_results
         # Option B: Judge LLM (User's request)
         # Pass the numbers to the Teacher Model for a nuanced critique
         judge_prompt = f"""
@@ -460,9 +437,9 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         G = GroundingScore(traits, history_excerpts) + U = UtilityScore(persona_description, heldout)
         """
         grounding_score = self._grounding_score({"traits": traits}, history_excerpts)
-        schwartz_alignment_score = self._score_schwartz_alignment(persona_description, traits)
-
-        return grounding_score * 0.5 + schwartz_alignment_score * 0.5
+        target_vec = traits[0] if isinstance(traits, list) and traits else (traits if isinstance(traits, dict) else {})
+        alignment_grade, _, _ = self._score_schwartz_alignment(persona_description, target_vec)
+        return grounding_score * 0.5 + alignment_grade * 0.5
         #skipping utility score for now
 
 
@@ -516,29 +493,30 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                 raw_output = call_persona_model()
                 generated_persona = raw_output
               
-                alignment_grade, raw_pvq_val = self._score_schwartz_alignment(generated_persona, shift_vector)
-                score = alignment_grade        
+                alignment_grade, raw_pvq_val, agent_vector = self._score_schwartz_alignment(generated_persona, shift_vector)
+                score = alignment_grade
             except Exception as e:
                 print(f"Error generating persona: {e}")
                 generated_persona = ""
                 score = 0.0
                 alignment_grade = 0.0
                 raw_pvq_val = 0.0
+                agent_vector = None
 
             outputs.append(generated_persona)
             scores.append(score)
             if capture_traces:
-      
                 trajectories.append(
                     PersonaTrajectory(
                         user_id=data_inst.user_id,
                         posts=data_inst.posts,
-                        anchor_demographics=str(data_inst.anchor_demographics),
                         subreddit=data_inst.subreddit,
-                        generated_persona=generated_persona,
-                        shift_vector=shift_vector,
+                        anchor_demographics=str(data_inst.anchor_demographics),
                         schwartz_alignment_score=alignment_grade,
+                        generated_persona=generated_persona,
                         raw_pvq_score=raw_pvq_val,
+                        shift_vector=shift_vector,
+                        agent_vector=agent_vector,
                     )
                 )
         return EvaluationBatch(outputs=outputs, scores=scores, trajectories=trajectories)
@@ -604,7 +582,7 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                 4. THE AGENT'S BEHAVIOR (The Failure):
                 - The Agent took a personality test acting as this persona.
                 - It scored {actual_val:.2f} on {primary_trait}.
-                - Result: HUGE MISMATCH (Gap: {max_gap:.2f}).
+                - Result: MISMATCH (Gap: {max_gap:.2f}).
 
                 ANALYSIS QUESTION:
                 Did the "Generated Prompt" fail to emphasize {primary_trait} enough? 
@@ -759,7 +737,7 @@ if __name__ == "__main__":
     seed_candidate=base_candidate,
     trainset=trainset,
     valset=valset,
-    max_metric_calls=50, # <-- Set a budget
+    max_metric_calls=200, # <-- Set a budget
     reflection_lm=teacher_model, # <-- Use a strong model to reflect on mistakes and propose better prompts
     adapter=adapter,
 )
