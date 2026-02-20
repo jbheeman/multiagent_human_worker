@@ -79,10 +79,14 @@ def run(config: RunConfig) -> List[EnvRunResult]:
                     env=isolated_env,
                     task_index=idx,
                 )
+                # Capture user sim's inner monologue (thought + utterance per turn) for results
+                info = dict(res.info)
+                if hasattr(isolated_env.user, "get_inner_monologue"):
+                    info["user_inner_monologue"] = isolated_env.user.get_inner_monologue()
                 result = EnvRunResult(
                     task_id=idx,
                     reward=res.reward,
-                    info=res.info,
+                    info=info,
                     traj=res.messages,
                     trial=i,
                 )

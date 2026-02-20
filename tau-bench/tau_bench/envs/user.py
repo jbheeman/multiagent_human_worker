@@ -36,16 +36,16 @@ class HumanUserSimulationEnv(BaseUserSimulationEnv):
         return 0
 
 
-PERSONA_PROMPT = """
-"""
-
-# load persona prompt from file
+# load persona prompt from file (look next to package: tau_bench/persona1.txt)
+import os as _os
+_PERSONA_PATH = _os.path.join(_os.path.dirname(__file__), "..", "persona1.txt")
 try:
-    with open("persona3.txt", "r") as f:
+    with open(_PERSONA_PATH, "r") as f:
         PERSONA_PROMPT = f.read()
 except FileNotFoundError:
-    print("Warning: security_persona.txt not found, using empty persona prompt")
+    print("Warning: persona1.txt not found at", _PERSONA_PATH, ", using empty persona prompt")
     PERSONA_PROMPT = ""
+
 
 class LLMUserSimulationEnv(BaseUserSimulationEnv):
     def __init__(self, model: str, provider: str, temperature: float = 0.7) -> None:
@@ -139,7 +139,8 @@ def sample_knobs(values: dict) -> dict:
 
 class ReactUserSimulationEnv(LLMUserSimulationEnv):
     def __init__(self, model: str, provider: str, persona_prompt: str = "", temperature: float = 0.7, seed: int | None = None, knobs: dict | None = None) -> None:
-        self.persona_prompt = persona_prompt or ""
+        
+        self.persona_prompt = persona_prompt or PERSONA_PROMPT
         # Sample knobs if not provided (for testing variance)
         # if knobs is None:
         #     # Default values - you can parse these from persona later
@@ -179,7 +180,7 @@ Hard rules:
 - You MAY vary tone, verbosity, hesitation, and questions according to the persona + style settings.
 - If the goal is satisfied, set "user" to exactly: ###STOP###
 
-⚠️ CRITICAL OUTPUT FORMAT ⚠️
+ CRITICAL OUTPUT FORMAT 
 You MUST respond with ONLY a valid JSON object. NO OTHER TEXT. NO markdown code blocks. NO explanations.
 
 Start your response with {{ and end with }}
@@ -190,18 +191,18 @@ Required JSON structure:
   "user": "your message to the agent here"
 }}
 
-✅ CORRECT examples:
+CORRECT examples:
 {{"thought": "They asked for help, I should mention my order", "user": "Hi, I need help with order #W1234567"}}
 
 {{"thought": "Goal is complete now", "user": "###STOP###"}}
 
 {{"thought": "I'm frustrated because this is taking too long", "user": "Look, I already told you the order number!"}}
 
-❌ WRONG - do NOT do this:
+ WRONG - do NOT do this:
 Thought: ...
 User Response: ...
 
-❌ WRONG - do NOT use markdown:
+ WRONG - do NOT use markdown:
 ```json
 {{"thought": "...", "user": "..."}}
 ```
@@ -372,6 +373,31 @@ Remember: Start with {{ and output ONLY the JSON object."""
 
     def get_total_cost(self) -> float:
         return self.total_cost
+
+    def get_inner_monologue(self) -> List[Dict[str, str]]:
+        """
+        Extract thought + user utterance for each user-sim turn from self.messages.
+        Used to save user reasoning in results (traj only has the utterance sent to the agent).
+        """
+        out: List[Dict[str, str]] = []
+        for msg in self.messages:
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content") or ""
+            thought, user_utterance = "", ""
+            try:
+                data = json.loads(content.strip())
+                thought = (data.get("thought") or "").strip()
+                user_utterance = (data.get("user") or "").strip()
+            except (json.JSONDecodeError, TypeError):
+                if "User Response:" in content:
+                    m = re.search(r"User Response:\s*(.*?)\s*$", content, flags=re.DOTALL)
+                    thought = content.split("User Response:")[0].strip()
+                    user_utterance = m.group(1).strip() if m else ""
+                else:
+                    user_utterance = content.strip()
+            out.append({"thought": thought, "user_utterance": user_utterance})
+        return out
 
 
 class VerifyUserSimulationEnv(LLMUserSimulationEnv):

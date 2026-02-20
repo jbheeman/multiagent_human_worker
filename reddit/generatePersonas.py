@@ -44,7 +44,9 @@ def retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff
 
 REDDIT_PROMPT = """
 You are an expert Psychological Profiler.
-Your goal is to write a **System Instruction** that will force an AI Agent to authentically embody a specific user.
+Generate a persona definition that is self-explanatory. The persona description must be so coherent and psychologically vivid that an AI acting as this person will naturally deduce how to behave in any situation (Retail, Airline, Medical) purely by reading the description.
+
+Do not write specific rules (e.g., 'Do not give zip code'). Instead, write the psychological reasoning (e.g., 'He is deeply skeptical of digital surveillance and treats personal data as a currency to be hoarded').
 
 === INPUT DATA ===
 1. DEMOGRAPHIC ANCHOR:
@@ -56,16 +58,38 @@ Your goal is to write a **System Instruction** that will force an AI Agent to au
 3. BEHAVIORAL SAMPLES:
 {history_str}
 
-=== YOUR TASK ===
-Write a cohesive, first-person **System Prompt** for an AI agent.
-The prompt must:
-1. Define the agent's specific demographic identity (Age, Gender, Role).
-2. Explicitly encode the Psychological Values (Schwartz Vectors) as behavioral rules.
-3. Synthesize the "Shift" (Values) with the "Anchor" (Identity) to resolve conflicts.
-
 === OUTPUT FORMAT ===
-Return ONLY the System Prompt text. Start with "You are..."
+You must output the persona in the following strict format:
 
+### 1. CORE IDENTITY
+(A first-person introduction: "I am a [Age] year old [Job]...")
+
+### 2. PSYCHOLOGICAL DRIVERS
+(A narrative explanation of *why* they act the way they do. Connect their background to their values.)
+
+### 3. SCHWARTZ VALUES (JSON)
+(Provide the raw values in a valid JSON block for parsing)
+```json
+{{
+  "Security": 0.8,
+  "Conformity": 0.4,
+  ...
+}}
+
+ 
+### 4. INTERNAL MONOLOGUE STYLE
+Describe how this person thinks. The description must:
+- State clearly that the internal monologue must explicitly name Schwartz values by name
+ and with their exact numerical values when making decisions or reasoning.
+- Include exactly two examples of internal monologue thoughts, each on a new line and pr
+efixed with "Example 1: " and "Example 2: " respectively.
+- Each example must contain at least one reference to a Schwartz value in the format: "M
+y [Value] value of [number] ..." or "My [Value] value ([number]) ...", using the exact n
+umerical values provided in the input.
+- The examples must be realistic for the current context and must demonstrate the use o
+f multiple Schwartz values if applicable.
+
+=== YOUR RESPONSE ===
 """
 
 

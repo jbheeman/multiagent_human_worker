@@ -188,8 +188,18 @@ You must output the persona in the following strict format:
   ...
 }}
 
-4. INTERNAL MONOLOGUE STYLE
-(Describe how this person thinks. E.g., "Anxious, rapid-fire questioning" or "Methodical and slow" based on schwartz values+persona description.)
+ 
+### 4. INTERNAL MONOLOGUE STYLE
+Describe how this person thinks. The description must:
+- State clearly that the internal monologue must explicitly name Schwartz values by name
+ and with their exact numerical values when making decisions or reasoning.
+- Include exactly two examples of internal monologue thoughts, each on a new line and pr
+efixed with "Example 1: " and "Example 2: " respectively.
+- Each example must contain at least one reference to a Schwartz value in the format: "M
+y [Value] value of [number] ..." or "My [Value] value ([number]) ...", using the exact n
+umerical values provided in the input.
+- The examples must be realistic for a retail environment and must demonstrate the use o
+f multiple Schwartz values if applicable.
 
 === YOUR RESPONSE === """
 
@@ -254,6 +264,9 @@ PVQ_DATA = {
     }
 }
 
+# 4. INTERNAL MONOLOGUE STYLE
+# (Describe how this person thinks. E.g., "Anxious, rapid-fire questioning" or "Methodical and slow" based on schwartz values+persona description.)
+
 
 
 
@@ -261,8 +274,21 @@ def load_persona_dataset(path: str) -> list[PersonaDataInst]:
     with open(path, "r") as f:
         examples: list[PersonaDataInst] = []
         for row in f:
-            data = json.loads(row)
-            examples.append(PersonaDataInst(user_id=data["user_id"], subreddit=data["subreddit"], posts=data["posts"], anchor_demographics=data["anchor_demographics"], shift_vector=data["shift_vector"], target_vector=data["target_vector"]))
+            # Skip completely empty / whitespace-only lines to be robust to trailing newlines
+            stripped = row.strip()
+            if not stripped:
+                continue
+            data = json.loads(stripped)
+            examples.append(
+                PersonaDataInst(
+                    user_id=data["user_id"],
+                    subreddit=data["subreddit"],
+                    posts=data["posts"],
+                    anchor_demographics=data["anchor_demographics"],
+                    shift_vector=data["shift_vector"],
+                    target_vector=data["target_vector"],
+                )
+            )
     return examples
 
 
@@ -537,8 +563,11 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         trajectories: list[PersonaTrajectory] | None = [] if capture_traces else None
 
         # use candidate["persona_prompt"], not hard-coded BASE_PROMPT_STRING
+        total = len(batch)
+
         prompt_template = candidate["persona_prompt"]
-        for data_inst in batch:
+        for i,data_inst in enumerate(batch):
+            print(f"Evaluating {i+1}/{total}...")
             traits = []
             persona_text = ""
             score = 0.0
@@ -553,7 +582,8 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                 reddit_context = data_inst.subreddit
                 psych_vector_str = ", ".join([f"{k}: {v:.2f}" for k, v in shift_vector.items()])
                 history_str = "\n---\n".join(data_inst.posts)
-                prompt = prompt_template.format(anchor_demographics=demographics_str, subreddit=reddit_context, psych_vector_str=psych_vector_str, history_str=history_str)
+                # Substitute only our placeholders; GEPA-evolved prompts may contain literal { } (e.g. JSON) which would break .format()
+                prompt = prompt_template.replace("{anchor_demographics}", demographics_str).replace("{subreddit}", reddit_context).replace("{psych_vector_str}", psych_vector_str).replace("{history_str}", history_str)
                 @retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0)
                 def call_persona_model():
                     response_message = persona_model([{"role": "user", "content": prompt}])
@@ -719,16 +749,19 @@ if __name__ == "__main__":
 }
 
 
-    trainset = load_persona_dataset("train_reddit_enriched.jsonl")
-    # random.seed(42) # Fixed seed for reproducibility
-    random.shuffle(trainset)
+    trainset_full = load_persona_dataset("train_reddit_enriched.jsonl")
+    trainset = random.sample(trainset_full, min(2, len(trainset_full)))
     # print(trainset[0].history[0].get("rating"))
     # print(trainset[1].history[0].get("review_excerpt"))
     # print(trainset[0].schwartz_vector)
     # schwartz_vector = trainset[4].schwartz_vector
     # print(trainset[0].history[0].get("product").get("title"))
     # print(trainset[0].heldout)
-    valset   = load_persona_dataset("val_reddit_enriched.jsonl")
+    valset_full = load_persona_dataset("val_reddit_enriched.jsonl")
+    # Use same 2 for val every run (reproducible validation across iterations)
+    random.seed(42)
+    valset = random.sample(valset_full, min(2, len(valset_full)))
+    random.seed()  # Reset so future sampling is random
     adapter = PersonaGEPAAdapter()
  
 
@@ -772,7 +805,7 @@ if __name__ == "__main__":
     seed_candidate=base_candidate,
     trainset=trainset,
     valset=valset,
-    max_metric_calls=200, # <-- Set a budget
+    max_metric_calls=50, # <-- Set a budget
     reflection_lm=teacher_model, # <-- Use a strong model to reflect on mistakes and propose better prompts
     adapter=adapter,
 )
