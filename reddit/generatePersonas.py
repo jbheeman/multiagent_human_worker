@@ -6,7 +6,7 @@ import re
 import time
 from functools import wraps
 from dataclasses import dataclass
-
+from cleanpersona import _clean_persona
 persona_model = OpenAIServerModel(
         model_id="gpt-oss",
         api_base="https://ellm.nrp-nautilus.io/v1",
@@ -44,7 +44,7 @@ def retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff
 
 REDDIT_PROMPT = """
 You are an expert Psychological Profiler.
-Generate a persona definition that is self-explanatory. The persona description must be so coherent and psychologically vivid that an AI acting as this person will naturally deduce how to behave in any situation (Retail, Airline, Medical) purely by reading the description.
+Generate a persona definition that is self-explanatory. The persona description must be so coherent and psychologically vivid that an AI acting as this person will naturally deduce how to behave in any situation purely by reading the description.
 
 Do not write specific rules (e.g., 'Do not give zip code'). Instead, write the psychological reasoning (e.g., 'He is deeply skeptical of digital surveillance and treats personal data as a currency to be hoarded').
 
@@ -132,7 +132,7 @@ if __name__ == "__main__":
     #validation_personas.jsonl - write userID+generated persona as {userID: persona}
 
     # trainset = load_persona_dataset("train_gdelt_enriched.jsonl")
-    testset = load_persona_dataset("test_reddit_enriched.jsonl")
+    testset = load_persona_dataset("personasforpaper.jsonl")
     total_users = len(testset)
     print(f"Loaded {testset} users from test.jsonl")
     
@@ -160,7 +160,8 @@ if __name__ == "__main__":
                 posts = testset[i].posts
                 prompt = REDDIT_PROMPT.format(history_str=posts, anchor_demographics=anchor_demographics, subreddit=subreddit, psych_vector_str=psych_vector_str)
                 response_message = call_persona_model(prompt)
-                persona_description = response_message
+                persona_description = _clean_persona(response_message)
+
 
                 print(f"Persona description: {persona_description}")
                 if not persona_description:
@@ -177,7 +178,7 @@ if __name__ == "__main__":
                 
                 
                 
-                f.write(json.dumps({"user_id": user_id, "persona": persona_description}) + "\n")
+                f.write(json.dumps({"user_id": user_id, "persona": persona_description}, ensure_ascii=False) + "\n")
                 f.flush()  # Ensure data is written immediately
                 
                 successful += 1
