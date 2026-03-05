@@ -126,12 +126,19 @@ class UserSimulator(BaseUser):
         if self.instructions is None:
             logger.warning("No instructions provided for user simulator")
 
-        # Layer mode: persona_prompt already has everything except scenario
+        # Layer mode: persona_prompt already has everything except scenario.
+        # When tools are available (e.g. telecom domain user tools), append the
+        # tools-specific simulation guidelines so the user knows when to call
+        # tools vs. send a text message.
         if self.persona_prompt is not None:
-            return LAYER_SYSTEM_PROMPT.format(
+            prompt = LAYER_SYSTEM_PROMPT.format(
                 persona_prompt=self.persona_prompt,
                 instructions=self.instructions or "",
             )
+            if self.tools:
+                tools_guidelines = get_global_user_sim_guidelines(use_tools=True)
+                prompt = prompt + "\n\n--- TOOL GUIDELINES ---\n\n" + tools_guidelines
+            return prompt
 
         # Legacy mode: yaml_content + file-based guidelines
         return LEGACY_SYSTEM_PROMPT.format(
@@ -205,6 +212,11 @@ class UserSimulator(BaseUser):
         )
 
         user_response = assistant_message.content
+        # Guard: if model returned neither text nor tool calls, use a minimal
+        # fallback so orchestrator validate() doesn't crash the whole simulation.
+        if not user_response and not assistant_message.tool_calls:
+            logger.warning("User simulator returned empty response; using fallback.")
+            user_response = "..."
         logger.debug(f"Response: {user_response}")
 
         user_message = UserMessage(

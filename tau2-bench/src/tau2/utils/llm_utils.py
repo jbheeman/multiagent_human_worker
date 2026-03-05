@@ -202,6 +202,16 @@ def generate(
     if model.startswith("claude") and not ALLOW_SONNET_THINKING:
         kwargs["thinking"] = {"type": "disabled"}
     litellm_messages = to_litellm_messages(messages)
+    # Some OpenAI-compatible APIs (e.g. Nautilus) reject conversations where the
+    # first non-system message is from the assistant.  Insert a dummy user message
+    # to maintain the required user→assistant alternation.
+    non_system = [m for m in litellm_messages if m.get("role") != "system"]
+    if non_system and non_system[0].get("role") == "assistant":
+        insert_idx = next(
+            (i for i, m in enumerate(litellm_messages) if m.get("role") != "system"),
+            len(litellm_messages),
+        )
+        litellm_messages.insert(insert_idx, {"role": "user", "content": "[...]"})
     tools = [tool.openai_schema for tool in tools] if tools else None
     if tools and tool_choice is None:
         tool_choice = "auto"

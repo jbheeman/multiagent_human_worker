@@ -219,6 +219,7 @@ def run_condition(
     num_tasks: Optional[int] = None,
     task_ids: Optional[list[str]] = None,
     task_split: Optional[str] = None,
+    task_persona_filter: Optional[str] = None,
     num_trials: int = 1,
     max_steps: int = 100,
     seed: int = 300,
@@ -260,8 +261,12 @@ def run_condition(
         os.environ["OPENAI_API_KEY"] = api_key
         os.environ["OPENAI_API_BASE"] = api_base
 
-    # Register Nautilus models
-    models = ["openai/llama3-sdsc", "meta-llama/Llama-3.3-70B-Instruct", "openai/qwen3", "Qwen/Qwen3.5-397B-A17B-FP8", "openai/gemma3"]
+    # Register Nautilus models (bare names, prefixed names, and gateway-resolved names)
+    models = [
+        "openai/llama3-sdsc", "llama3-sdsc", "meta-llama/Llama-3.3-70B-Instruct",
+        "openai/gemma3", "gemma3", "google/gemma-3-27b-it",
+        "openai/qwen3", "qwen3",
+    ]
     for m in models:
         litellm.model_cost[m] = {"input_cost_per_token": 0.0, "output_cost_per_token": 0.0, "max_tokens": 32768}
     litellm.request_timeout = 120
@@ -278,6 +283,10 @@ def run_condition(
         task_ids=task_ids,
         num_tasks=num_tasks,
     )
+    if task_persona_filter is not None:
+        tag = f"PERSONA:{task_persona_filter}"
+        tasks = [t for t in tasks if tag in t.id]
+        print(f"Filtered to {len(tasks)} tasks with {tag}")
     print(f"\n{'='*60}")
     print(f"CONDITION: {condition}")
     print(f"Domain: {domain}, Tasks: {len(tasks)}, Trials: {num_trials}, Agent: {agent_type}")
@@ -412,6 +421,9 @@ def main():
     parser.add_argument("--task-split", default=None,
                         choices=["base", "small", "train", "test"],
                         help="Named task split (e.g., 'small', 'test')")
+    parser.add_argument("--task-persona-filter", default=None,
+                        choices=["None", "Easy", "Hard"],
+                        help="Filter tasks by built-in tau2 persona tag (None/Easy/Hard)")
     parser.add_argument("--num-trials", type=int, default=1, help="Trials per task")
     parser.add_argument("--max-steps", type=int, default=100, help="Max steps per sim")
     parser.add_argument("--seed", type=int, default=300, help="Random seed")
@@ -476,6 +488,7 @@ def main():
                 num_tasks=args.num_tasks,
                 task_ids=args.task_ids,
                 task_split=args.task_split,
+                task_persona_filter=args.task_persona_filter,
                 num_trials=args.num_trials,
                 max_steps=args.max_steps,
                 seed=args.seed,

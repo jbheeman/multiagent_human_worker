@@ -136,6 +136,11 @@ Available domains: airline (50 tasks), retail (114 tasks),
         "--seed", type=int, default=300,
         help="Random seed (default: 300)",
     )
+    parser.add_argument(
+        "--task-persona-filter", default=None,
+        choices=["None", "Easy", "Hard"],
+        help="Filter tasks by built-in tau2 persona tag (None/Easy/Hard)",
+    )
 
     args = parser.parse_args()
 
@@ -199,12 +204,13 @@ Available domains: airline (50 tasks), retail (114 tasks),
 
         skipped = len(all_personas) - len(personas_to_run)
         skip_msg = f" ({skipped} already done)" if skipped > 0 else ""
+        pf = f" [PERSONA:{args.task_persona_filter}]" if args.task_persona_filter else ""
         task_desc = (
             f"{num_tasks} tasks" if num_tasks
             else f"split '{args.task_split}'" if args.task_split
             else f"tasks {task_ids}" if task_ids
             else "all tasks"
-        )
+        ) + pf
         print(f"\n[{domain.upper()}] Running {len(personas_to_run)} personas on {task_desc}{skip_msg}")
 
         try:
@@ -215,6 +221,8 @@ Available domains: airline (50 tasks), retail (114 tasks),
                 output_dir=domain_output,
                 task_ids=task_ids,
                 num_tasks=num_tasks,
+                task_split=args.task_split if not num_tasks and not task_ids else None,
+                task_persona_filter=args.task_persona_filter,
                 num_trials=args.num_trials,
                 seed=args.seed,
                 llm_agent=args.model,

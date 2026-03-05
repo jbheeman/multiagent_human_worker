@@ -362,6 +362,8 @@ def run_pipeline(
     log_path: Optional[str] = None,
     tier: Optional[str] = None,
     model_id: str = "qwen3",
+    limit: Optional[int] = None,
+    offset: int = 0,
 ):
     """Run the full persona generation pipeline.
 
@@ -375,6 +377,8 @@ def run_pipeline(
         log_path: Optional JSONL log file path.
         tier: Optional valence name (positive, neutral, negative).
         model_id: LLM model ID to use for generation.
+        limit: Max Reddit users to process.
+        offset: Skip first N Reddit users.
     """
     from persona.valence import Valence
     tier_enum = Valence(tier) if tier else None
@@ -382,6 +386,9 @@ def run_pipeline(
 
     # Load Reddit data
     dataset = load_reddit_dataset(input_path)
+    dataset = dataset[offset:]
+    if limit and limit < len(dataset):
+        dataset = dataset[:limit]
     print(f"Loaded {len(dataset)} users from {input_path}")
     print(f"Mode: {mode.value}")
     print(f"Synthetic: {num_synthetic}")
@@ -471,6 +478,10 @@ if __name__ == "__main__":
                         help="Generation mode for Reddit-grounded personas")
     parser.add_argument("--num-synthetic", type=int, default=0,
                         help="Number of additional synthetic personas")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Max Reddit users to process (default: all)")
+    parser.add_argument("--offset", type=int, default=0,
+                        help="Skip first N Reddit users (default: 0)")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed for reproducibility")
     parser.add_argument("--log", default="pipeline_log.jsonl",
@@ -497,5 +508,7 @@ if __name__ == "__main__":
         seed=args.seed,
         log_path=args.log,
         tier=args.tier,
+        limit=args.limit,
+        offset=args.offset,
         model_id=args.model,
     )
