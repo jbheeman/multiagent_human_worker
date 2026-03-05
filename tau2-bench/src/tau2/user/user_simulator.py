@@ -1,3 +1,5 @@
+import os
+from pathlib import Path
 from typing import Optional, Tuple
 
 from loguru import logger
@@ -23,13 +25,37 @@ from tau2.user.base import (
 from tau2.utils import DATA_DIR
 from tau2.utils.llm_utils import generate
 
-# with open("/home/pgen/personagen/tau2-bench/src/tau2/user/RedditPersona.txt", "r") as fp:
-#     persona_text= fp.read()
 
-with open("/home/pgen/personagen/tau2-bench/src/tau2/user/eval_personas/onewatt.yaml", "r") as fp:
-    yaml_content= fp.read()
+PERSONA_ENV_VAR = "TAU2_PERSONA_FILE"
+_DEFAULT_PERSONA_PATH = (
+    Path(__file__).parent / "eval_personas" / "afcagroo.yaml"
+)
 
-print("yaml_content: ", yaml_content)
+
+def _load_persona_yaml() -> tuple[str, Path]:
+    """
+    Load persona YAML content and return (content, path).
+    Prefers TAU2_PERSONA_FILE env var; falls back to default path.
+    """
+    env_path = os.getenv(PERSONA_ENV_VAR)
+    if env_path:
+        persona_path = Path(env_path).expanduser().resolve()
+    else:
+        persona_path = _DEFAULT_PERSONA_PATH.resolve()
+
+    if not persona_path.exists():
+        raise FileNotFoundError(
+            f"Persona file not found at {persona_path}. "
+            f"Set {PERSONA_ENV_VAR} to a valid YAML path."
+        )
+
+    with open(persona_path, "r") as fp:
+        content = fp.read()
+    return content, persona_path
+
+
+yaml_content, persona_yaml_path = _load_persona_yaml()
+persona_name = persona_yaml_path.stem
 
 GLOBAL_USER_SIM_GUIDELINES_DIR = DATA_DIR / "tau2" / "user_simulator"
 

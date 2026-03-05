@@ -27,6 +27,8 @@ from tau2.registry import RegistryInfo, registry
 from tau2.user.user_simulator import (
     DummyUser,
     get_global_user_sim_guidelines,
+    persona_name,
+    persona_yaml_path,
     yaml_content,
 )
 from tau2.utils.display import ConsoleDisplay, Text
@@ -642,6 +644,8 @@ def get_info(
         llm=llm_user,
         llm_args=llm_args_user,
         global_simulation_guidelines=get_global_user_sim_guidelines(),
+        persona_name=persona_name,
+        persona_file=str(persona_yaml_path) if persona_yaml_path else None,
     )
     agent_info = AgentInfo(
         implementation=agent,
