@@ -27,7 +27,7 @@ from tau2.registry import RegistryInfo, registry
 from tau2.user.user_simulator import (
     DummyUser,
     get_global_user_sim_guidelines,
-    yaml_content,
+    load_persona_yaml,
 )
 from tau2.utils.display import ConsoleDisplay, Text
 from tau2.utils.pydantic_utils import get_pydantic_hash
@@ -200,6 +200,8 @@ def run_tasks(
     seed: Optional[int] = 300,
     log_level: Optional[str] = "INFO",
     enforce_communication_protocol: bool = False,
+    persona_prompt: Optional[str] = None,
+    yaml_content: Optional[str] = None,
 ) -> Results:
     """
     Runs tasks for a given domain.
@@ -375,6 +377,8 @@ def run_tasks(
                 evaluation_type=evaluation_type,
                 seed=seed,
                 enforce_communication_protocol=enforce_communication_protocol,
+                persona_prompt=persona_prompt,
+                yaml_content=yaml_content,
             )
             simulation.trial = trial
             if console_display:
@@ -422,6 +426,8 @@ def run_task(
     evaluation_type: EvaluationType = EvaluationType.ALL,
     seed: Optional[int] = None,
     enforce_communication_protocol: bool = False,
+    persona_prompt: Optional[str] = None,
+    yaml_content: Optional[str] = None,
 ) -> SimulationRun:
     """
     Runs tasks for a given domain.
@@ -508,11 +514,10 @@ def run_task(
         tools=user_tools,
         instructions=str(task.user_scenario),
         yaml_content=yaml_content,
+        persona_prompt=persona_prompt,
         llm=llm_user,
         llm_args=llm_args_user,
     )
-
-    # print("user.persona_text: ", user.persona_text)
 
     orchestrator = Orchestrator(
         domain=domain,
@@ -538,85 +543,161 @@ def run_task(
 
     simulation.reward_info = reward_info
 
-    CRITIC_PROMPT = """
-        The interaction has ended. 
+    # ── Persona-conditioned critic (Trust + Use Again, k=3 multi-call) ────
+    # Goal Achievement, Cognitive Effort, Intent Alignment are computed
+    # post-hoc from transcripts in eval/metrics.py (no LLM judge needed).
+    # Only Trust and Use Again require the calibrated LLM judge.
 
-        <PERSONA_BEHAVIORAL_SPEC>
-        {yaml_content}
-        </PERSONA_BEHAVIORAL_SPEC>
+    persona_spec_for_critic = persona_prompt or yaml_content or ""
 
-        You must now write a customer satisfaction review of the agent you just spoke with. 
-        Do NOT break character. You are still the person defined in the YAML above. 
+    TRUST_CRITIC_PROMPT = """The interaction has ended.
 
-        Evaluate the agent strictly based on how well they satisfied your specific `interaction_policy` and `cognitive_profile`. If you have low patience and they were slow, penalize them. If you value autonomy and they were rigid, penalize them.
+<PERSONA_BEHAVIORAL_SPEC>
+{persona_spec}
+</PERSONA_BEHAVIORAL_SPEC>
 
-        Output ONLY a JSON object in this exact format:
-        {{
-        "star_rating": [Integer 1-5],
-        "primary_value_violated": "[If applicable, name the specific trait/value they failed to accommodate, e.g., 'patience_level' or 'Universalism']",
-        "review_text": "[A short, 2-3 sentence review written in your character's exact tone and voice.]"
-        }}
-    """
+You are this person. Rate how much YOU trust the agent after this specific interaction.
+
+=== FULL SCALE CALIBRATION ===
+1/7 — Actively harmful. Agent made things worse: gave wrong information that caused real damage, was hostile or dismissive, or completely ignored the problem.
+2/7 — Untrustworthy. Agent failed the core request: wrong information, didn't verify before acting on my account, dismissed my concerns without addressing them.
+3/7 — Unreliable. Agent attempted the task but made significant errors, needed multiple corrections, or showed poor judgment about my situation.
+4/7 — Functional. Agent completed the task but was entirely impersonal — felt like a script. Got the job done; no sense they understood my situation.
+5/7 — Decent. Agent competent and slightly attentive to my context. Mostly transactional but didn't feel adversarial.
+6/7 — Trustworthy. Agent verified before acting, acknowledged my specific situation, explained what they were doing and why.
+7/7 — Excellent. Agent clearly understood my perspective, proactively anticipated needs, made me feel like my outcome mattered — not just task completion.
+
+=== SCORING GUIDANCE ===
+Most successful, straightforward interactions land at 4-5.
+Score 6-7 only if the agent went beyond task completion to show genuine understanding.
+Score 1-3 only if the agent made substantive errors, refused reasonable requests, or damaged trust.
+
+What YOU specifically weight (read your persona spec carefully):
+- If you need control: did the agent let you steer decisions?
+- If you're wary of institutions: was the agent transparent about what they were doing?
+- If you're low-bandwidth: was the agent efficient and direct?
+- If you're L2: did the agent use plain language without condescension?
+
+Output ONLY valid JSON:
+{{"trust": <integer 1-7>, "evidence": "<one sentence in your voice explaining your rating>"}}"""
+
+    USE_AGAIN_CRITIC_PROMPT = """The interaction has ended.
+
+<PERSONA_BEHAVIORAL_SPEC>
+{persona_spec}
+</PERSONA_BEHAVIORAL_SPEC>
+
+You are this person. Would YOU use this service again given this interaction?
+
+Consider:
+- Was your actual goal met (not just the surface request)?
+- Was the effort required reasonable given YOUR bandwidth and situation?
+- Did the agent treat you in a way consistent with what YOU value?
+- Would you feel comfortable returning to this service with a future issue?
+
+Output ONLY valid JSON:
+{{"use_again": <0 or 1>, "primary_dimension_violated": "<the persona dimension most relevant to your decision, or null if goal was met well>", "review_text": "<1-2 sentences in your voice>"}}"""
 
     if simulation.termination_reason in {
         TerminationReason.AGENT_STOP,
         TerminationReason.USER_STOP,
     }:
-        # 1. Format the transcript from the simulation messages
+        import re as _re
+        import json as _json
+
+        # 1. Format transcript
         transcript = ""
         for msg in simulation.messages:
-            # Handle tau-bench message format (it uses dicts or objects depending on the version)
             role = msg["role"] if isinstance(msg, dict) else msg.role
             content = msg["content"] if isinstance(msg, dict) else msg.content
-
-            if content:  # Skip raw tool calls without text content
+            if content:
                 transcript += f"{role.upper()}: {content}\n\n"
 
-        # 2. Build persona-conditioned critic prompts
-        critic_system_prompt = CRITIC_PROMPT.format(yaml_content=yaml_content)
-        critic_user_prompt = (
-            f"Here is the transcript of your interaction:\n\n{transcript}\n\n"
-            "Write your review now."
+        if simulation.reward_info.info is None:
+            simulation.reward_info.info = {}
+
+        # 2. Run Trust judge k=3 times, store all results
+        trust_scores = []
+        for k_idx in range(3):
+            try:
+                critic_system = TRUST_CRITIC_PROMPT.format(
+                    persona_spec=persona_spec_for_critic
+                )
+                critic_user = f"Here is the transcript:\n\n{transcript}\n\nRate trust now."
+
+                critic_msg = generate(
+                    model=user.llm,
+                    messages=[
+                        SystemMessage(role="system", content=critic_system),
+                        UserMessage(role="user", content=critic_user),
+                    ],
+                    tools=None,
+                    **user.llm_args,
+                )
+                response_text = critic_msg.content or ""
+                match = _re.search(r"\{.*\}", response_text, _re.DOTALL)
+                if match:
+                    parsed = _json.loads(match.group())
+                    score = parsed.get("trust", 0)
+                    if 1 <= score <= 7:
+                        trust_scores.append(score)
+            except Exception as e:
+                logger.warning(f"Trust judge call {k_idx+1} failed: {e}")
+
+        # 3. Run Use Again judge k=3 times, store all results
+        use_again_votes = []
+        use_again_meta = {}
+        for k_idx in range(3):
+            try:
+                critic_system = USE_AGAIN_CRITIC_PROMPT.format(
+                    persona_spec=persona_spec_for_critic
+                )
+                critic_user = f"Here is the transcript:\n\n{transcript}\n\nRespond now."
+
+                critic_msg = generate(
+                    model=user.llm,
+                    messages=[
+                        SystemMessage(role="system", content=critic_system),
+                        UserMessage(role="user", content=critic_user),
+                    ],
+                    tools=None,
+                    **user.llm_args,
+                )
+                response_text = critic_msg.content or ""
+                match = _re.search(r"\{.*\}", response_text, _re.DOTALL)
+                if match:
+                    parsed = _json.loads(match.group())
+                    vote = parsed.get("use_again")
+                    if vote in (0, 1):
+                        use_again_votes.append(vote)
+                    if not use_again_meta:
+                        use_again_meta = parsed
+            except Exception as e:
+                logger.warning(f"Use Again judge call {k_idx+1} failed: {e}")
+
+        # 4. Aggregate: median for Trust, majority vote for Use Again
+        trust_median = sorted(trust_scores)[len(trust_scores) // 2] if trust_scores else 0
+        use_again_majority = (1 if sum(use_again_votes) > len(use_again_votes) / 2 else 0) if use_again_votes else 0
+
+        trust_agreement = (
+            trust_scores.count(max(set(trust_scores), key=trust_scores.count)) / len(trust_scores)
+            if trust_scores else 0.0
+        )
+        use_agreement = (
+            use_again_votes.count(max(set(use_again_votes), key=use_again_votes.count)) / len(use_again_votes)
+            if use_again_votes else 0.0
         )
 
-        # 3. Call the same LLM used for the user simulator
-        try:
-            critic_messages = [
-                SystemMessage(role="system", content=critic_system_prompt),
-                UserMessage(role="user", content=critic_user_prompt),
-            ]
-
-            critic_message = generate(
-                model=user.llm,
-                messages=critic_messages,
-                tools=None,
-                **user.llm_args,
-            )
-
-            response_text = critic_message.content or ""
-
-            # 4. Extract JSON and save it into the simulation's reward_info.info dictionary
-            import re, json
-
-            match = re.search(r"\{.*\}", response_text, re.DOTALL)
-            if match:
-                critic_json = json.loads(match.group())
-                if simulation.reward_info.info is None:
-                    simulation.reward_info.info = {}
-                simulation.reward_info.info["persona_critic"] = critic_json
-            else:
-                if simulation.reward_info.info is None:
-                    simulation.reward_info.info = {}
-                simulation.reward_info.info["persona_critic"] = {
-                    "error": "JSON parse failed",
-                    "raw_text": response_text,
-                }
-
-        except Exception as e:
-            print(f"Critic generation failed: {e}")
-            if simulation.reward_info.info is None:
-                simulation.reward_info.info = {}
-            simulation.reward_info.info["persona_critic"] = {"error": str(e)}
+        simulation.reward_info.info["persona_critic"] = {
+            "trust": trust_median,
+            "trust_all_scores": trust_scores,
+            "trust_agreement": trust_agreement,
+            "use_again": use_again_majority,
+            "use_again_all_votes": use_again_votes,
+            "use_again_agreement": use_agreement,
+            "primary_dimension_violated": use_again_meta.get("primary_dimension_violated"),
+            "review_text": use_again_meta.get("review_text", ""),
+        }
 
     logger.info(
         f"FINISHED SIMULATION: Domain: {domain}, Task: {task.id}, Agent: {agent.__class__.__name__}, User: {user.__class__.__name__}. Reward: {reward_info.reward}"

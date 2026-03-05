@@ -1,20 +1,86 @@
-from smolagents.models import OpenAIServerModel
-import os
-from typing import Any
+"""Layer-based persona generation pipeline.
+
+Replaces the old Schwartz-based pipeline with the 3-layer persona system.
+
+Modes:
+- FULLY_GROUNDED: Extract L0 + L1 from Reddit, sample L2
+- PARTIALLY_GROUNDED: Extract L0 from Reddit, sample L1 + L2
+- SYNTHETIC: Sample all layers (no Reddit data needed)
+
+Steps (grounded modes):
+1. Extract layer codes from Reddit user data (LLM call)
+2. Sample remaining layers randomly
+3. Compile IF/THEN behavioral rules (LLM call)
+4. Conformance check + retry loop (LLM call)
+5. Assemble system prompt and write YAML output
+"""
+
 import json
-import re
+import os
 import time
-from functools import wraps
 from dataclasses import dataclass
-from cleanpersona import _clean_persona
+from functools import wraps
+from typing import Optional
 
-persona_model = OpenAIServerModel(
-        model_id="qwen3",
-        api_base="https://ellm.nrp-nautilus.io/v1",
-        api_key=os.getenv("NAUT_API_KEY"),
-    )
+import yaml
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from persona.assembler import assemble_system_prompt
+from persona.compiler import compile_rules
+from persona.conformance import check_conformance, extract_critique
+from persona.extractor import extract_layers
+from persona.registry import LayerRegistry
+from persona.sampler import PersonaSampler
+from persona.schema import GenerationMode, PersonaConfig
+
+# LLM backend: use smolagents if available, otherwise fallback to openai client
+try:
+    from smolagents.models import OpenAIServerModel
+    _HAS_SMOLAGENTS = True
+except ImportError:
+    _HAS_SMOLAGENTS = False
 
 
+# ── LLM configuration ──────────────────────────────────────────────────────
+
+class _OpenAIFallbackModel:
+    """Minimal OpenAI-compatible chat model for when smolagents is not installed."""
+
+    def __init__(self, model_id: str, api_base: str, api_key: str):
+        from openai import OpenAI
+        self.client = OpenAI(base_url=api_base, api_key=api_key)
+        self.model_id = model_id
+
+    def __call__(self, messages: list[dict]) -> "types.SimpleNamespace":
+        import types
+        response = self.client.chat.completions.create(
+            model=self.model_id,
+            messages=messages,
+        )
+        result = types.SimpleNamespace()
+        result.content = response.choices[0].message.content
+        return result
+
+
+def make_llm_model(
+    model_id: str = "qwen3",
+    api_base: Optional[str] = None,
+    api_key: Optional[str] = None,
+):
+    """Create an LLM model for pipeline calls.
+
+    Uses smolagents.OpenAIServerModel if available, falls back to openai client.
+    """
+    base = api_base or os.getenv("NAUTILUS_API_BASE") or "https://ellm.nrp-nautilus.io/v1"
+    key = api_key or os.getenv("NAUTILUS_API_KEY") or ""
+    if _HAS_SMOLAGENTS:
+        return OpenAIServerModel(model_id=model_id, api_base=base, api_key=key)
+    return _OpenAIFallbackModel(model_id=model_id, api_base=base, api_key=key)
+
+
+# ── Retry utility ──────────────────────────────────────────────────────────
 
 def retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0):
     """Decorator to retry a function with exponential backoff on timeout or connection errors."""
@@ -27,344 +93,409 @@ def retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff
                     return func(*args, **kwargs)
                 except (TimeoutError, ConnectionError, Exception) as e:
                     error_str = str(e).lower()
-                    is_timeout = "timeout" in error_str or "timed out" in error_str
-                    
+                    is_retryable = (
+                        "timeout" in error_str
+                        or "timed out" in error_str
+                        or "connection" in error_str
+                    )
                     if attempt == max_retries - 1:
-                        # Last attempt failed, raise the exception
                         raise
-                    
-                    if is_timeout or "connection" in error_str:
-                        print(f"Attempt {attempt + 1}/{max_retries} failed: {e}. Retrying in {delay:.1f}s...")
+                    if is_retryable:
+                        print(f"  Attempt {attempt + 1}/{max_retries} failed: {e}. Retrying in {delay:.1f}s...")
                         time.sleep(delay)
                         delay = min(delay * backoff_factor, max_delay)
                     else:
-                        # Non-timeout error, don't retry
                         raise
             return None
         return wrapper
     return decorator
 
 
-
-
-REDDIT_PROMPT = """
-You are an expert Psychological Profiler.
-Generate a persona definition that is self-explanatory. The persona description must be so coherent and psychologically vivid that an AI acting as this person will naturally deduce how to behave in any situation purely by reading the description.
-
-Do not write specific rules (e.g., 'Do not give zip code'). Instead, write the psychological reasoning (e.g., 'He is deeply skeptical of digital surveillance and treats personal data as a currency to be hoarded').
-
-=== INPUT DATA ===
-1. DEMOGRAPHIC ANCHOR:
-{anchor_demographics}
-
-2. PSYCHOLOGICAL SHIFT (Context: r/{subreddit}):
-{psych_vector_str}
-
-3. BEHAVIORAL SAMPLES:
-{history_str}
-
-=== OUTPUT FORMAT ===
-You must output the persona in the following strict format:
-
-### 1. CORE IDENTITY
-(A first-person introduction: "I am a [Age] year old [Job]...")
-
-### 2. PSYCHOLOGICAL DRIVERS
-(A narrative explanation of *why* they act the way they do. Connect their background to their values.)
-
-### 3. SCHWARTZ VALUES (JSON)
-(Provide the raw values in a valid JSON block for parsing)
-```json
-{{
-  "Security": 0.8,
-  "Conformity": 0.4,
-  ...
-}}
-
-=== YOUR RESPONSE ===
-"""
-
-CLAUDE_PROMPT = """
-You are an expert Persona Compiler for Multi-Agent Simulation Environments. Your objective is to ingest raw, narrative-heavy human personas and compile them into strict, machine-readable YAML behavioral specifications. 
-
-These YAML specifications will be used to govern the behavior of a simulated user interacting with a target agent in an objective, state-tracking benchmark (e.g., Dec-POMDP environments like Tau-bench).
-
-YOUR DIRECTIVES:
-1. Strip all narrative fluff, backstory, and "internal monologue" rules.
-2. CRITICAL - DYNAMIC KEYS: For `cognitive_profile` and `interaction_policy`, you MUST invent custom, highly specific keys tailored to the specific Schwartz values of the persona. DO NOT use generic keys like "technical_competence", "patience_level", or "adaptability" for everyone. Invent keys like "authority_defiance", "novelty_seeking", "bureaucracy_tolerance", or "empathy_capacity".
-3. Translate abstract values into concrete, observable Interaction Policies.
-4. Define strict State-Transition Rules (If/Then heuristics) that dictate exactly how the persona reacts to specific agent behaviors.
-5. Output ONLY valid YAML. Do not include any conversational filler, preamble, or postscript.
-
-YAML SCHEMA TO POPULATE:
-
-persona_profile:
-  id: [Generate a descriptive string, e.g., "28F_High_Stimulation"]
-  demographics: [Brief string summarizing age, role, region]
-
-cognitive_profile:
-  [INVENT_CUSTOM_TRAIT_1]: [Low/Medium/High/Specific Descriptor]
-  [INVENT_CUSTOM_TRAIT_2]: [Low/Medium/High/Specific Descriptor]
-  [INVENT_CUSTOM_TRAIT_3]: [Low/Medium/High/Specific Descriptor]
-
-interaction_policy:
-  [INVENT_CUSTOM_POLICY_1]: [Specific Descriptor]
-  [INVENT_CUSTOM_POLICY_2]: [Specific Descriptor]
-  escalation_trigger: [Specific condition that causes them to demand a human/supervisor]
-
-state_transition_rules:
-  - "IF the agent asks you to wait or delays, THEN [Specific behavioral reaction]"
-  - "IF the agent denies a request based on strict policy, THEN [Specific behavioral reaction]"
-  - "IF the agent makes a mistake, THEN [Specific behavioral reaction]"
-  - "[Add 1-2 more IF/THEN rules specific to this persona's dominant Schwartz values]"
-
-termination_conditions:
-  success: "The final database state matches the initial goal."
-  abandonment: "[Specific condition where this persona gives up, e.g., 'Agent repeats the same question 3 times' or 'Task takes more than 5 turns']"
-"""
-
-CONFORMANCE_PROMPT = """
-You are an Automated Conformance Evaluator for Multi-Agent Behavioral Specs.
-Your task is to verify that a compiled YAML behavioral profile strictly aligns with its source Schwartz Values vector.
-
-INPUT A (Source Values JSON):
-{schwartz_json}
-
-INPUT B (Compiled YAML):
-{yaml_file}
-
-EVALUATION CRITERIA:
-Analyze the YAML against the source values and output a JSON evaluation with binary pass/fail scores.
-
-1. Dominant Values Check: Identify the top 2 highest Schwartz values in INPUT A. Does the YAML explicitly codify behavioral policies, triggers, or tone that manifest these specific dominant values? 
-2. Inferior Values Check: Identify the 1 lowest Schwartz value in INPUT A. Does the YAML explicitly show a lack of concern, or resistance, related to this lowest value?
-3. State-Transition Verifiability: Do the state_transition_rules contain strict "IF/THEN" behavioral heuristics rather than vague narrative guidelines?
-4. Termination Bounds Check: Are there strict, numerical bounds on when the persona abandons the task (e.g., specific turn limits, repetition limits)?
-
-OUTPUT FORMAT (output ONLY valid JSON, no preamble):
-{{
-  "Dominant_Values_Check": {{"pass": true/false, "identified_values": "[List the 2 values]", "reason": "..."}},
-  "Inferior_Value_Check": {{"pass": true/false, "identified_value": "[List the 1 value]", "reason": "..."}},
-  "State_Transition_Check": {{"pass": true/false, "reason": "..."}},
-  "Termination_Check": {{"pass": true/false, "reason": "..."}},
-  "OVERALL_STATUS": "APPROVE or REJECT"
-}}
-"""
-
-
-
+# ── Data loading ───────────────────────────────────────────────────────────
 
 @dataclass
-class PersonaDataInst:
-    user_id: str             # "lumenation"
-    subreddit: str           # "r/KotakuInAction" (The Context)
-    
-    # INPUTS FOR THE AGENT
-    posts: list[str]         # The 5 posts from THIS subreddit only
-    anchor_demographics: str # "28M, Developer, St. Louis" (extracted globally)
-    shift_vector: dict       # {"POWER": 0.8, ...} (extracted locally from these posts)
-    
-    # GROUND TRUTH (For Evaluation)
-    # We test if the agent matches THIS vector, not the global average
-    target_vector: dict      # Same as shift_vector
+class RedditUserData:
+    """Input data for a single Reddit user."""
+    user_id: str
+    subreddit: str
+    posts: list[str]
+    anchor_demographics: dict  # {"age": 28, "gender": "male", "occupation": "...", "location": "..."}
 
 
-
-def load_persona_dataset(path: str) -> list[PersonaDataInst]:
+def load_reddit_dataset(path: str) -> list[RedditUserData]:
+    """Load Reddit user data from JSONL file."""
+    examples = []
     with open(path, "r") as f:
-        examples: list[PersonaDataInst] = []
         for row in f:
+            row = row.strip()
+            if not row:
+                continue
             try:
                 data = json.loads(row)
-                examples.append(PersonaDataInst(user_id=data["user_id"], subreddit=data["subreddit"], posts=data["posts"], anchor_demographics=data["anchor_demographics"], shift_vector=data["shift_vector"], target_vector=data["target_vector"]))
+                examples.append(RedditUserData(
+                    user_id=data["user_id"],
+                    subreddit=data["subreddit"],
+                    posts=data["posts"],
+                    anchor_demographics=data.get("anchor_demographics", {}),
+                ))
             except Exception as e:
                 print(f"Error loading row: {e}")
                 continue
     return examples
 
 
-@retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0)
-def call_persona_model(prompt: str) -> str:
-    response_message = persona_model([{"role": "user", "content": prompt}])
-    return response_message.content or ""
+def demographics_to_string(demographics: dict) -> str:
+    """Convert demographics dict to readable string."""
+    if isinstance(demographics, str):
+        return demographics
+    parts = []
+    if "age" in demographics:
+        parts.append(str(demographics["age"]))
+    if "gender" in demographics:
+        g = demographics["gender"]
+        parts.append("M" if g.lower().startswith("m") else "F" if g.lower().startswith("f") else g)
+    if "occupation" in demographics:
+        parts.append(demographics["occupation"])
+    if "location" in demographics:
+        parts.append(demographics["location"])
+    return ", ".join(parts) if parts else "Unknown"
 
 
-def extract_schwartz_json(persona_text: str) -> dict:
-    """Parse the ```json block from the raw REDDIT_PROMPT output."""
-    match = re.search(r'```json\s*(\{.*?\})\s*```', persona_text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            pass
-    # Fallback: grab any bare JSON object in the text
-    match = re.search(r'\{[^{}]*"[A-Za-z]+":\s*[\d.]+.*?\}', persona_text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
-    return {}
+# ── Pipeline core ──────────────────────────────────────────────────────────
 
+class PersonaPipeline:
+    """Generates personas using the 3-layer system.
 
-@retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0)
-def compile_persona(persona_description: str, critique: str = None) -> str:
-    prompt = CLAUDE_PROMPT
-    if critique:
-        prompt += (
-            "\n\n=== REVISION CONSTRAINTS (must address before outputting YAML) ===\n"
-            f"{critique}\n"
-            "Address every constraint above. Do NOT rewrite from scratch; only adjust the fields that failed.\n"
+    Args:
+        specs_dir: Path to the specs/ directory with layer spec markdown files.
+        model_id: LLM model to use for extraction/compilation/conformance.
+        api_base: LLM API base URL.
+        api_key: LLM API key (defaults to NAUTILUS_API_KEY env var).
+        seed: Random seed for sampler reproducibility.
+        max_conformance_retries: Max attempts for compile → conform loop.
+    """
+
+    def __init__(
+        self,
+        specs_dir: str,
+        model_id: str = "qwen3",
+        api_base: Optional[str] = None,
+        api_key: Optional[str] = None,
+        seed: Optional[int] = None,
+        max_conformance_retries: int = 3,
+        tier: Optional["Valence"] = None,
+    ):
+        from persona.sampler import PersonaSampler
+        self.registry = LayerRegistry(specs_dir)
+        self.sampler = PersonaSampler(self.registry, seed=seed, tier=tier)
+        self.model = make_llm_model(model_id, api_base, api_key)
+        self.max_conformance_retries = max_conformance_retries
+
+        # Verify registry parsed everything
+        stats = self.registry.stats()
+        mismatches = {k: v for k, v in stats.items() if not v["ok"]}
+        if mismatches:
+            print(f"WARNING: Registry parsing mismatches: {mismatches}")
+
+    @retry_with_backoff(max_retries=3)
+    def _llm_call(self, prompt: str) -> str:
+        """Make an LLM call with retry."""
+        response = self.model([{"role": "user", "content": prompt}])
+        return response.content or ""
+
+    def generate_grounded(
+        self,
+        user_data: RedditUserData,
+        mode: GenerationMode,
+    ) -> PersonaConfig:
+        """Generate a persona grounded in Reddit data.
+
+        Args:
+            user_data: Reddit user data (posts, demographics, subreddit).
+            mode: FULLY_GROUNDED or PARTIALLY_GROUNDED.
+
+        Returns:
+            PersonaConfig with all 12 dimensions + compiled rules.
+        """
+        demographics_str = demographics_to_string(user_data.anchor_demographics)
+
+        # Step 1: Extract layer codes from Reddit data
+        print(f"    Extracting layers ({mode.value})...", end=" ", flush=True)
+        extracted_codes, extraction_info = extract_layers(
+            registry=self.registry,
+            demographics=demographics_str,
+            subreddit=user_data.subreddit,
+            posts=user_data.posts,
+            mode=mode,
+            llm_call=self._llm_call,
         )
-    prompt += f"\n\n=== RAW PERSONA ===\n{persona_description}\n\n=== YOUR YAML OUTPUT ==="
-    response = persona_model([{"role": "user", "content": prompt}])
-    return response.content or ""
+        print(f"got {len(extracted_codes)} codes")
+
+        if not extracted_codes:
+            print(f"    WARNING: Extraction returned no codes, falling back to synthetic")
+            return self.generate_synthetic(demographics=demographics_str)
+
+        # Step 2: Sample remaining layers + build PersonaConfig
+        config = self.sampler.sample_persona(
+            mode=mode,
+            fixed_codes=extracted_codes,
+            demographics=demographics_str,
+            source_user_id=user_data.user_id,
+            source_subreddit=user_data.subreddit,
+            extraction_justification=extraction_info,
+        )
+
+        # Step 3: Compile rules + conformance check
+        config = self._compile_with_conformance(config)
+        return config
+
+    def generate_synthetic(
+        self,
+        demographics: str = "",
+    ) -> PersonaConfig:
+        """Generate a fully synthetic persona (no Reddit data).
+
+        Returns:
+            PersonaConfig with all 12 dimensions + compiled rules.
+        """
+        config = self.sampler.sample_persona(
+            mode=GenerationMode.SYNTHETIC,
+            demographics=demographics,
+        )
+        config = self._compile_with_conformance(config)
+        return config
+
+    def _compile_with_conformance(self, config: PersonaConfig) -> PersonaConfig:
+        """Compile rules and run conformance check with retry loop.
+
+        Up to max_conformance_retries attempts:
+        1. Compile IF/THEN rules
+        2. Check conformance
+        3. If rejected, compile again with critique
+        """
+        critique = None
+
+        for attempt in range(self.max_conformance_retries):
+            # Compile rules
+            print(f"    Compiling rules (attempt {attempt + 1})...", end=" ", flush=True)
+            config = compile_rules(config, self._llm_call)
+
+            if not config.state_transition_rules:
+                print("WARNING: compiler returned no rules")
+                continue
+
+            # Check conformance
+            conformance_result = check_conformance(config, self._llm_call)
+            status = conformance_result.get("OVERALL_STATUS", "UNKNOWN")
+            print(f"conformance: {status}")
+
+            if status == "APPROVE":
+                return config
+
+            # Build critique for retry
+            critique = extract_critique(conformance_result)
+            print(f"    Critique: {critique[:200]}")
+
+            # TODO: feed critique back into compiler on next iteration
+            # For now the compiler doesn't accept critique yet — the retry
+            # just re-runs with the same config hoping for different output.
+            # A more robust approach would modify compile_rules to accept critique.
+
+        print(f"    Edge case: failed conformance after {self.max_conformance_retries} attempts")
+        return config
+
+    def generate_and_save(
+        self,
+        config: PersonaConfig,
+        output_dir: str,
+        filename: Optional[str] = None,
+    ) -> str:
+        """Save a persona to YAML file.
+
+        Args:
+            config: Completed PersonaConfig.
+            output_dir: Directory to write YAML to.
+            filename: Optional filename (defaults to code_string or user_id).
+
+        Returns:
+            Path to the written YAML file.
+        """
+        os.makedirs(output_dir, exist_ok=True)
+
+        if filename is None:
+            if config.source_user_id:
+                filename = f"{config.source_user_id}.yaml"
+            else:
+                # Use code string with slashes replaced
+                filename = config.code_string.replace("/", "_") + ".yaml"
+
+        output_path = os.path.join(output_dir, filename)
+
+        yaml_dict = config.to_yaml_dict()
+        with open(output_path, "w") as f:
+            yaml.dump(yaml_dict, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+        return output_path
+
+    def generate_assembled_prompt(
+        self,
+        config: PersonaConfig,
+        scenario_instructions: str = "",
+    ) -> str:
+        """Generate the full assembled system prompt for the simulator.
+
+        This combines vignettes, anti-imitation rules, ground rules,
+        compiled IF/THEN rules, and scenario instructions.
+        """
+        return assemble_system_prompt(self.registry, config, scenario_instructions)
 
 
-@retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0)
-def call_conformance_model(prompt: str) -> dict:
-    response = persona_model([{"role": "user", "content": prompt}])
-    text = response.content or ""
-    match = re.search(r'\{.*\}', text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
-    return {}
+# ── CLI entry point ────────────────────────────────────────────────────────
 
+def run_pipeline(
+    input_path: str,
+    output_dir: str,
+    specs_dir: str,
+    mode: GenerationMode = GenerationMode.FULLY_GROUNDED,
+    num_synthetic: int = 0,
+    seed: Optional[int] = None,
+    log_path: Optional[str] = None,
+    tier: Optional[str] = None,
+    model_id: str = "qwen3",
+):
+    """Run the full persona generation pipeline.
 
-def extract_critique(conformance_result: dict) -> str:
-    """Build a targeted critique from the failed checks in a conformance result."""
-    lines = []
-    for key, val in conformance_result.items():
-        if key == "OVERALL_STATUS":
-            continue
-        if isinstance(val, dict) and not val.get("pass", True):
-            lines.append(f"- {key}: {val.get('reason', 'No reason provided.')}")
-    return "\n".join(lines) if lines else "General conformance failure — tighten IF/THEN rules and termination bounds."
+    Args:
+        input_path: Path to Reddit JSONL data.
+        output_dir: Directory for output YAML files.
+        specs_dir: Path to specs/ directory.
+        mode: Generation mode for Reddit-grounded personas.
+        num_synthetic: Number of additional synthetic personas to generate.
+        seed: Random seed for reproducibility.
+        log_path: Optional JSONL log file path.
+        tier: Optional valence name (positive, neutral, negative).
+        model_id: LLM model ID to use for generation.
+    """
+    from persona.valence import Valence
+    tier_enum = Valence(tier) if tier else None
+    pipeline = PersonaPipeline(specs_dir=specs_dir, seed=seed, tier=tier_enum, model_id=model_id)
 
-
-#Steps:
-#1. Generate a persona using the REDDIT_PROMPT
-#2. Compile the persona into a YAML file using the CLAUDE_PROMPT
-#3. Evaluate the YAML file using the CONFORMANCE_PROMPT - which needs schwartz values as input from original persona <- can parse from original persona or from the data we use for persona generation
-#4. If the YAML file is not approved, go back to step 2 and generate a new persona with critique Pass the Critique as a Direct Constraint, not a Rewrite from Scratch
-    #Implement a Hard Cutoff ($k=3$) LLMs can occasionally get stuck in a loop where fixing one constraint breaks another. To prevent infinite API calls, implement a max_retries counter. If a persona fails the conformance check 3 times, kick it out of the automated pipeline and log it as an "edge-case failure" for your methodology section. Documenting why certain value combinations fail to compile cleanly is actually a great finding for the paper.
-
-
-if __name__ == "__main__":
-
-    #validation_personas.jsonl - write userID+generated persona as {userID: persona}
-
-    # trainset = load_persona_dataset("train_gdelt_enriched.jsonl")
-    testset = load_persona_dataset("/home/pgen/personagen/multiagent_human_worker/reddit/personasforpaper.jsonl")
-    total_users = len(testset)
-    print(f"Loaded {testset} users from personasforpaper.jsonl")
-    
-    # Load existing user_ids from output file to skip already processed users
-    output_file = "pipeline_personas.jsonl"
-    eval_folder = "/home/pgen/personagen/multiagent_human_worker/reddit/eval_personas"
-    os.makedirs(eval_folder, exist_ok=True)
-
-    
-    
-    print(f"Starting pipeline...\n")
-    
-    MAX_CONFORMANCE_RETRIES = 3
+    # Load Reddit data
+    dataset = load_reddit_dataset(input_path)
+    print(f"Loaded {len(dataset)} users from {input_path}")
+    print(f"Mode: {mode.value}")
+    print(f"Synthetic: {num_synthetic}")
+    print()
 
     successful = 0
     failed = 0
-    skipped = 0
-    edge_case_failures = []
+    edge_cases = []
+    log_file = open(log_path, "a") if log_path else None
 
-    with open(output_file, "a") as f:
-        for i in range(len(testset)):
-            user_id = testset[i].user_id
-            # yaml_file = f"{eval_folder}/{user_id}.yaml" #yaml file for the persona
-            yaml_output_path = os.path.join(eval_folder, f"{user_id}.yaml")
+    # Summary of intent
+    print(f"Pipeline Mode: {mode.value}")
+    if mode != GenerationMode.SYNTHETIC:
+        print(f"Processing {len(dataset)} Reddit users...")
+    if num_synthetic > 0:
+        print(f"Generating {num_synthetic} additional synthetic personas...")
+    print(f"Valence Tier: {tier if tier else 'none'}")
+    print()
 
-            try:
-                print(f"[{i+1}/{total_users}] Processing user: {user_id}...", end=" ", flush=True)
+    successful = 0
+    failed = 0
+    edge_cases = []
+    log_file = open(log_path, "a") if log_path else None
 
-                anchor_demographics = testset[i].anchor_demographics
-                subreddit = testset[i].subreddit
-                psych_vector_str = testset[i].shift_vector
-                posts = testset[i].posts
-
-                prompt = REDDIT_PROMPT.format(
-                    history_str=posts,
-                    anchor_demographics=anchor_demographics,
-                    subreddit=subreddit,
-                    psych_vector_str=psych_vector_str,
-                )
-                response_message = call_persona_model(prompt)
-                persona_description = _clean_persona(response_message)
-
-                schwartz_json = extract_schwartz_json(persona_description)
-                if not schwartz_json:
-                    schwartz_json = testset[i].target_vector
-
-                # k=3 compile → conformance → critique retry loop
-                critique = None
-                conformance_result = None
-                approved = False
-
-                for attempt in range(MAX_CONFORMANCE_RETRIES):
-                    yaml_content = compile_persona(persona_description, critique=critique)
-
-                    conformance_result = call_conformance_model(
-                        CONFORMANCE_PROMPT.format(schwartz_json=schwartz_json, yaml_file=yaml_content)
-                    )
-                    if not conformance_result:
-                        print(f"\n  WARNING: Empty conformance result on attempt {attempt + 1}")
-                        break
-
-                    print(f"\n  Conformance attempt {attempt + 1}: {conformance_result.get('OVERALL_STATUS')}")
-
-                    if conformance_result.get("OVERALL_STATUS") == "APPROVE":
-                        approved = True
-                        break
-
-                    critique = extract_critique(conformance_result)
-                    print(f"  Critique: {critique}")
-
-                if not approved:
-                    print(f"  EDGE CASE: {user_id} failed conformance after {MAX_CONFORMANCE_RETRIES} attempts — logging.")
-                    edge_case_failures.append({
-                        "user_id": user_id,
-                        "last_conformance": conformance_result,
-                    })
+    try:
+        # Generate grounded personas from Reddit data (only if not in purely synthetic mode)
+        if mode != GenerationMode.SYNTHETIC:
+            for i, user_data in enumerate(dataset):
+                try:
+                    print(f"[{i + 1}/{len(dataset)}] {user_data.user_id} (r/{user_data.subreddit})")
+                    config = pipeline.generate_grounded(user_data, mode)
+                    yaml_path = pipeline.generate_and_save(config, output_dir)
+                    print(f"    Saved: {yaml_path}")
+                    # ... log writing ...
+                    successful += 1
+                except Exception as e:
                     failed += 1
+                    print(f"    FAILED: {e}")
+                    edge_cases.append({"user_id": user_data.user_id, "error": str(e)})
                     continue
 
-                # Write the yaml file to the eval_folder so we can evaluate the personas after the pipeline
-                yaml_output_path = os.path.join(eval_folder, f"{user_id}.yaml")
-                with open(yaml_output_path, "w") as file2:
-                    file2.write(yaml_content)
-
-                f.write(json.dumps({"user_id": user_id, "persona": persona_description, "yaml": yaml_output_path}, ensure_ascii=False) + "\n")
-                f.flush()
-
+        # Generate synthetic personas
+        for i in range(num_synthetic):
+            try:
+                label = f"synthetic_{i}"
+                print(f"[Synthetic {i + 1}/{num_synthetic}]")
+                config = pipeline.generate_synthetic()
+                yaml_path = pipeline.generate_and_save(config, output_dir)
+                print(f"    Saved: {yaml_path}")
+                # ... log writing ...
                 successful += 1
-                # if i == 1:
-                #     break
-                print(f"  ✓ Success")
-
             except Exception as e:
                 failed += 1
-                print(f"✗ Failed: {e}")
+                print(f"    FAILED: {e}")
+                edge_cases.append({"user_id": f"synthetic_{i}", "error": str(e)})
                 continue
 
-    if edge_case_failures:
-        with open("edge_case_failures.jsonl", "a") as ef:
-            for rec in edge_case_failures:
-                ef.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    finally:
+        if log_file:
+            log_file.close()
 
-    print(f"\n{'='*50}")
-    print(f"Generation complete!")
-    print(f"Successful: {successful}/{total_users}")
-    print(f"Skipped: {skipped}/{total_users}")
-    print(f"Failed: {failed}/{total_users}")
-    print(f"Edge-case failures logged: {len(edge_case_failures)}")
-    print(f"{'='*50}")
+    # Summary
+    total = len(dataset) + num_synthetic
+    print(f"\n{'=' * 50}")
+    print(f"Pipeline complete!")
+    print(f"Successful: {successful}/{total}")
+    print(f"Failed: {failed}/{total}")
+    if edge_cases:
+        print(f"Edge cases: {len(edge_cases)}")
+        for ec in edge_cases:
+            print(f"  - {ec['user_id']}: {ec['error'][:100]}")
+    print(f"{'=' * 50}")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Layer-based persona generation pipeline")
+    parser.add_argument("--input", default="reddit/personasforpaper.jsonl",
+                        help="Path to Reddit JSONL data")
+    parser.add_argument("--output", default="reddit/eval_personas",
+                        help="Output directory for YAML files")
+    parser.add_argument("--specs", default="specs",
+                        help="Path to specs/ directory")
+    parser.add_argument("--mode", default="fully_grounded",
+                        choices=["fully_grounded", "partially_grounded", "synthetic"],
+                        help="Generation mode for Reddit-grounded personas")
+    parser.add_argument("--num-synthetic", type=int, default=0,
+                        help="Number of additional synthetic personas")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed for reproducibility")
+    parser.add_argument("--log", default="pipeline_log.jsonl",
+                        help="JSONL log file path")
+    parser.add_argument("--tier", choices=["positive", "neutral", "negative"],
+                        help="Valence bias for sampled layers")
+    parser.add_argument("--model", default="qwen3",
+                        help="LLM model ID to use for generation")
+
+    args = parser.parse_args()
+
+    mode_map = {
+        "fully_grounded": GenerationMode.FULLY_GROUNDED,
+        "partially_grounded": GenerationMode.PARTIALLY_GROUNDED,
+        "synthetic": GenerationMode.SYNTHETIC,
+    }
+
+    run_pipeline(
+        input_path=args.input,
+        output_dir=args.output,
+        specs_dir=args.specs,
+        mode=mode_map[args.mode],
+        num_synthetic=args.num_synthetic,
+        seed=args.seed,
+        log_path=args.log,
+        tier=args.tier,
+        model_id=args.model,
+    )

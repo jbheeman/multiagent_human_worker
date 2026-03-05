@@ -23,14 +23,6 @@ from tau2.user.base import (
 from tau2.utils import DATA_DIR
 from tau2.utils.llm_utils import generate
 
-# with open("/home/pgen/personagen/tau2-bench/src/tau2/user/RedditPersona.txt", "r") as fp:
-#     persona_text= fp.read()
-
-with open("/home/pgen/personagen/tau2-bench/src/tau2/user/eval_personas/onewatt.yaml", "r") as fp:
-    yaml_content= fp.read()
-
-print("yaml_content: ", yaml_content)
-
 GLOBAL_USER_SIM_GUIDELINES_DIR = DATA_DIR / "tau2" / "user_simulator"
 
 
@@ -62,7 +54,14 @@ def get_global_user_sim_guidelines(use_tools: bool = False) -> str:
     return user_sim_guidelines
 
 
-SYSTEM_PROMPT = """
+def load_persona_yaml(path: str) -> str:
+    """Load persona YAML content from a file path."""
+    with open(path, "r") as fp:
+        return fp.read()
+
+
+# Legacy system prompt template (used when yaml_content is provided directly)
+LEGACY_SYSTEM_PROMPT = """
 {global_user_sim_guidelines}
 
 <PERSONA_BEHAVIORAL_SPEC>
@@ -74,23 +73,43 @@ SYSTEM_PROMPT = """
 </scenario>
 """.strip()
 
+# New layer-based system prompt template (used when persona_prompt is provided)
+# The persona_prompt already contains guidelines, anti-imitation, vignettes,
+# ground rules, and behavioral rules from persona/assembler.py.
+# We just add the scenario.
+LAYER_SYSTEM_PROMPT = """
+{persona_prompt}
 
+--- SCENARIO ---
+
+{instructions}
+""".strip()
 
 
 class UserSimulator(BaseUser):
-    """Stateless implementation of a user simulator."""
+    """Stateless implementation of a user simulator.
+
+    Supports two modes:
+    1. Legacy mode: Pass yaml_content (raw YAML string) — uses old template
+       with simulation guidelines from file.
+    2. Layer mode: Pass persona_prompt (assembled from persona/assembler.py) —
+       already contains guidelines, vignettes, rules, etc.
+    """
 
     def __init__(
         self,
         tools: Optional[list[Tool]] = None,
         instructions: Optional[UserInstructions] = None,
         yaml_content: Optional[str] = None,
+        persona_prompt: Optional[str] = None,
         llm: Optional[str] = None,
         llm_args: Optional[dict] = None,
     ):
         super().__init__(instructions=instructions, llm=llm, llm_args=llm_args)
         self.tools = tools
         self.yaml_content = yaml_content
+        self.persona_prompt = persona_prompt
+
     @property
     def global_simulation_guidelines(self) -> str:
         """
@@ -107,12 +126,19 @@ class UserSimulator(BaseUser):
         if self.instructions is None:
             logger.warning("No instructions provided for user simulator")
 
-        system_prompt = SYSTEM_PROMPT.format(
+        # Layer mode: persona_prompt already has everything except scenario
+        if self.persona_prompt is not None:
+            return LAYER_SYSTEM_PROMPT.format(
+                persona_prompt=self.persona_prompt,
+                instructions=self.instructions or "",
+            )
+
+        # Legacy mode: yaml_content + file-based guidelines
+        return LEGACY_SYSTEM_PROMPT.format(
             global_user_sim_guidelines=self.global_simulation_guidelines,
-            instructions=self.instructions,
-            yaml_content=self.yaml_content,
+            instructions=self.instructions or "",
+            yaml_content=self.yaml_content or "",
         )
-        return system_prompt
 
     def get_init_state(
         self, message_history: Optional[list[Message]] = None
