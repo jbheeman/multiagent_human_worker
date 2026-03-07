@@ -297,6 +297,12 @@ class UserInfo(BaseModel):
     global_simulation_guidelines: Optional[str] = Field(
         description="The global simulation guidelines for the user.", default=None
     )
+    persona_name: Optional[str] = Field(
+        description="Name of the persona YAML (stem) used for this run.", default=None
+    )
+    persona_file: Optional[str] = Field(
+        description="Resolved path to the persona YAML file.", default=None
+    )
 
 
 class Info(BaseModel):
