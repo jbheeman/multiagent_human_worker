@@ -26,7 +26,7 @@ from tau2.utils.llm_utils import generate
 # with open("/home/pgen/personagen/tau2-bench/src/tau2/user/RedditPersona.txt", "r") as fp:
 #     persona_text= fp.read()
 
-with open("/home/pgen/personagen/tau2-bench/src/tau2/user/eval_personas/onewatt.yaml", "r") as fp:
+with open("H:/multiagent_human_worker/tau2-bench/src/tau2/user/eval_personas/katyne.yaml", "r") as fp:
     yaml_content= fp.read()
 
 print("yaml_content: ", yaml_content)

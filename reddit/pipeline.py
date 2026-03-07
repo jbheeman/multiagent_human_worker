@@ -99,8 +99,17 @@ YOUR DIRECTIVES:
 YAML SCHEMA TO POPULATE:
 
 persona_profile:
-  id: [Generate a descriptive string, e.g., "28F_High_Stimulation"]
+  id: [Generate a descriptive string, e.g., "28_High_Stimulation"]
   demographics: [Brief string summarizing age, role, region]
+  communication_style:
+    formality: [Low/Medium/High] # Provide specific, actionable writing instructions instead of abstract traits
+    sentence_structure: "[Describe sentence length, pacing, and whether they use run-ons, fragments, or perfect grammar]"
+    vocabulary_and_lexicon: "[Describe specific word choices, industry jargon, slang, or idioms they rely on]"
+    punctuation_and_formatting: "[Describe their typing habits: do they ignore capitalization? Overuse ellipses? Use emojis or ALL CAPS?]"
+    example_utterances:
+        - "[Invent a highly specific quote demonstrating the above 3 traits perfectly]"
+        - "[Invent a second quote showing how they ask for help]"
+
 
 cognitive_profile:
   [INVENT_CUSTOM_TRAIT_1]: [Low/Medium/High/Specific Descriptor]
@@ -171,7 +180,7 @@ class PersonaDataInst:
 
 
 def load_persona_dataset(path: str) -> list[PersonaDataInst]:
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         examples: list[PersonaDataInst] = []
         for row in f:
             try:
@@ -258,13 +267,13 @@ if __name__ == "__main__":
     #validation_personas.jsonl - write userID+generated persona as {userID: persona}
 
     # trainset = load_persona_dataset("train_gdelt_enriched.jsonl")
-    testset = load_persona_dataset("/home/pgen/personagen/multiagent_human_worker/reddit/personasforpaper.jsonl")
+    testset = load_persona_dataset("H:/multiagent_human_worker/reddit/personasforpaper.jsonl")
     total_users = len(testset)
     print(f"Loaded {testset} users from personasforpaper.jsonl")
     
     # Load existing user_ids from output file to skip already processed users
     output_file = "pipeline_personas.jsonl"
-    eval_folder = "/home/pgen/personagen/multiagent_human_worker/reddit/eval_personas"
+    eval_folder = "H:/multiagent_human_worker/reddit/eval_personas"
     os.makedirs(eval_folder, exist_ok=True)
 
     
@@ -278,7 +287,7 @@ if __name__ == "__main__":
     skipped = 0
     edge_case_failures = []
 
-    with open(output_file, "a") as f:
+    with open(output_file, "a", encoding="utf-8") as f:
         for i in range(len(testset)):
             user_id = testset[i].user_id
             # yaml_file = f"{eval_folder}/{user_id}.yaml" #yaml file for the persona
@@ -340,7 +349,7 @@ if __name__ == "__main__":
 
                 # Write the yaml file to the eval_folder so we can evaluate the personas after the pipeline
                 yaml_output_path = os.path.join(eval_folder, f"{user_id}.yaml")
-                with open(yaml_output_path, "w") as file2:
+                with open(yaml_output_path, "w", encoding="utf-8") as file2:
                     file2.write(yaml_content)
 
                 f.write(json.dumps({"user_id": user_id, "persona": persona_description, "yaml": yaml_output_path}, ensure_ascii=False) + "\n")
@@ -357,7 +366,7 @@ if __name__ == "__main__":
                 continue
 
     if edge_case_failures:
-        with open("edge_case_failures.jsonl", "a") as ef:
+        with open("edge_case_failures.jsonl", "a", encoding="utf-8") as ef:
             for rec in edge_case_failures:
                 ef.write(json.dumps(rec, ensure_ascii=False) + "\n")
 

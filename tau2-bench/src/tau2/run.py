@@ -285,7 +285,7 @@ def run_tasks(
                 raise FileExistsError(
                     f"File {save_to} already exists. Please delete it or use a different save_to name."
                 )
-            with open(save_to, "r") as fp:
+            with open(save_to, "r", encoding="utf-8") as fp:
                 prev_simulation_results = Results.model_validate_json(fp.read())
                 # Check if the run config has changed
                 if get_pydantic_hash(prev_simulation_results.info) != get_pydantic_hash(
@@ -341,17 +341,17 @@ def run_tasks(
             if not save_to.parent.exists():
                 save_to.parent.mkdir(parents=True, exist_ok=True)
             logger.info(f"Saving simulation batch to {save_to}")
-            with open(save_to, "w") as fp:
+            with open(save_to, "w", encoding="utf-8") as fp:
                 fp.write(simulation_results.model_dump_json(indent=2))
 
     def _save(simulation: SimulationRun):
         if save_to is None:
             return
         with lock:
-            with open(save_to, "r") as fp:
+            with open(save_to, "r", encoding="utf-8") as fp:
                 ckpt = json.load(fp)
             ckpt["simulations"].append(simulation.model_dump())
-            with open(save_to, "w") as fp:
+            with open(save_to, "w", encoding="utf-8") as fp:
                 json.dump(ckpt, fp, indent=2)
 
     def _run(task: Task, trial: int, seed: int, progress_str: str) -> SimulationRun:

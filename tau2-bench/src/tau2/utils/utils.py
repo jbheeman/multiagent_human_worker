@@ -64,7 +64,7 @@ def format_time(time: datetime) -> str:
     """
     Format the time in the format YYYYMMDD_HHMMSS.
     """
-    return time.isoformat()
+    return time.isoformat().replace(":", "-")
 
 
 def get_commit_hash() -> str:

@@ -104,7 +104,14 @@ class LLMAgent(LocalAgent[LLMAgentState]):
             state.messages.extend(message.tool_messages)
         else:
             state.messages.append(message)
-        messages = state.system_messages + state.messages
+        
+        messages = deepcopy(state.system_messages + state.messages)
+        # Strip internal monologue from UserMessages before passing to Agent LLM
+        import re
+        for msg in messages:
+            if isinstance(msg, UserMessage) and msg.content and "<internal_monologue>" in msg.content:
+                msg.content = re.sub(r"<internal_monologue>.*?</internal_monologue>\s*", "", msg.content, flags=re.DOTALL).strip()
+
         assistant_message = generate(
             model=self.llm,
             tools=self.tools,
@@ -232,7 +239,14 @@ class LLMGTAgent(LocalAgent[LLMAgentState]):
             state.messages.extend(message.tool_messages)
         else:
             state.messages.append(message)
-        messages = state.system_messages + state.messages
+            
+        messages = deepcopy(state.system_messages + state.messages)
+        # Strip internal monologue from UserMessages before passing to Agent LLM
+        import re
+        for msg in messages:
+            if isinstance(msg, UserMessage) and msg.content and "<internal_monologue>" in msg.content:
+                msg.content = re.sub(r"<internal_monologue>.*?</internal_monologue>\s*", "", msg.content, flags=re.DOTALL).strip()
+
         assistant_message = generate(
             model=self.llm,
             tools=self.tools,

@@ -282,6 +282,15 @@ class ConsoleDisplay:
             for msg in simulation.messages:
                 content = msg.content if msg.content is not None else ""
                 details = ""
+                
+                # Extract internal monologue if present
+                if "<internal_monologue>" in content:
+                    import re
+                    match = re.search(r"<internal_monologue>(.*?)</internal_monologue>", content, flags=re.DOTALL)
+                    if match:
+                        monologue = match.group(1).strip()
+                        content = re.sub(r"<internal_monologue>.*?</internal_monologue>\s*", "", content, flags=re.DOTALL).strip()
+                        details = f"[cyan]Internal Monologue:[/]\n{monologue}"
 
                 # Set different colors based on message type
                 if isinstance(msg, AssistantMessage):
@@ -311,11 +320,19 @@ class ConsoleDisplay:
                             tool_calls.append(
                                 f"[{tool_style}]Tool: {tool.name}[/]\n[{tool_style}]Args: {json.dumps(tool.arguments, indent=2)}[/]"
                             )
-                        details = "\n".join(tool_calls)
+                        if details:
+                            details += "\n\n" + "\n".join(tool_calls)
+                        else:
+                            details = "\n".join(tool_calls)
                 elif isinstance(msg, ToolMessage):
-                    details = f"[{content_style}]Tool ID: {msg.id}. Requestor: {msg.requestor}[/]"
+                    tool_details = f"[{content_style}]Tool ID: {msg.id}. Requestor: {msg.requestor}[/]"
                     if msg.error:
-                        details += " [bold red](Error)[/]"
+                        tool_details += " [bold red](Error)[/]"
+                    
+                    if details:
+                        details += "\n\n" + tool_details
+                    else:
+                        details = tool_details
 
 
                 # Add provider-specific reasoning / internal monologue if available
