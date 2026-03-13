@@ -167,6 +167,20 @@ class RunConfig(BaseModel):
             default=False,
         ),
     ]
+    critic_model: Annotated[
+        Optional[str],
+        Field(
+            description="LLM model for one-shot critic rewrite of agent responses. None disables the critic.",
+            default=None,
+        ),
+    ]
+    critic_for_tool_calls: Annotated[
+        bool,
+        Field(
+            description="Whether the critic also reviews tool call arguments (requires critic_model).",
+            default=False,
+        ),
+    ]
 
     def validate(self) -> None:
         """

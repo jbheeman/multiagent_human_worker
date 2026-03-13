@@ -176,6 +176,8 @@ def run_domain(config: RunConfig) -> Results:
         seed=config.seed,
         log_level=config.log_level,
         enforce_communication_protocol=config.enforce_communication_protocol,
+        critic_model=config.critic_model,
+        critic_for_tool_calls=config.critic_for_tool_calls,
     )
     metrics = compute_metrics(simulation_results)
     ConsoleDisplay.display_agent_metrics(metrics)
@@ -202,6 +204,8 @@ def run_tasks(
     seed: Optional[int] = 300,
     log_level: Optional[str] = "INFO",
     enforce_communication_protocol: bool = False,
+    critic_model: Optional[str] = None,
+    critic_for_tool_calls: bool = False,
 ) -> Results:
     """
     Runs tasks for a given domain.
@@ -377,6 +381,8 @@ def run_tasks(
                 evaluation_type=evaluation_type,
                 seed=seed,
                 enforce_communication_protocol=enforce_communication_protocol,
+                critic_model=critic_model,
+                critic_for_tool_calls=critic_for_tool_calls,
             )
             simulation.trial = trial
             if console_display:
@@ -424,6 +430,8 @@ def run_task(
     evaluation_type: EvaluationType = EvaluationType.ALL,
     seed: Optional[int] = None,
     enforce_communication_protocol: bool = False,
+    critic_model: Optional[str] = None,
+    critic_for_tool_calls: bool = False,
 ) -> SimulationRun:
     """
     Runs tasks for a given domain.
@@ -466,6 +474,8 @@ def run_task(
             domain_policy=environment.get_policy(),
             llm=llm_agent,
             llm_args=llm_args_agent,
+            critic_model=critic_model,
+            critic_for_tool_calls=critic_for_tool_calls,
         )
     elif issubclass(AgentConstructor, LLMGTAgent):
         agent = AgentConstructor(

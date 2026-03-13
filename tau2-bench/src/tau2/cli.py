@@ -141,6 +141,18 @@ def add_run_args(parser):
         default=False,
         help="Enforce communication protocol rules (e.g., no mixed messages with text and tool calls). Default is False.",
     )
+    parser.add_argument(
+        "--critic-model",
+        type=str,
+        default=None,
+        help="LLM model for one-shot critic rewrite of agent responses. Omit to disable critic.",
+    )
+    parser.add_argument(
+        "--critic-for-tool-calls",
+        action="store_true",
+        default=False,
+        help="Also critique tool call arguments (requires --critic-model).",
+    )
 
 
 def main():
@@ -172,6 +184,8 @@ def main():
                 seed=args.seed,
                 log_level=args.log_level,
                 enforce_communication_protocol=args.enforce_communication_protocol,
+                critic_model=args.critic_model,
+                critic_for_tool_calls=args.critic_for_tool_calls,
             )
         )
     )
