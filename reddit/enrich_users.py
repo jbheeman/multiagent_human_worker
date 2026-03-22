@@ -3,10 +3,42 @@ import os
 import re
 import httpx
 from openai import OpenAI
+from functools import wraps
+import time
 
 # Make sure to set NAUT_API_KEY in your environment before running
 INPUT_FILE = "thousand_users_raw.jsonl"
 OUTPUT_FILE = "thousand_reddit_enriched.jsonl"
+
+
+def retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0):
+    """Decorator to retry a function with exponential backoff on timeout or connection errors."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            delay = initial_delay
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    error_str = str(e).lower()
+                    is_timeout = "timeout" in error_str or "timed out" in error_str
+                    
+                    if is_timeout or "connection" in error_str:
+                        if attempt == max_retries - 1:
+                            print(f"Attempt {attempt + 1}/{max_retries} failed: {e}. Giving up.")
+                            return None
+                        print(f"Attempt {attempt + 1}/{max_retries} failed: {e}. Retrying in {delay:.1f}s...")
+                        time.sleep(delay)
+                        delay = min(delay * backoff_factor, max_delay)
+                    else:
+                        # Non-timeout error, don't retry (but don't crash the whole batch)
+                        print(f"Non-retryable error: {e}")
+                        return None
+            return None
+        return wrapper
+    return decorator
+
 
 http_client = httpx.Client(verify=False)
 client = OpenAI(
@@ -25,6 +57,7 @@ def extract_json(raw_text):
         pass
     return None
 
+@retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0)
 def get_schwartz_vector_chameleon(user_id, contextual_posts):
     # Format the posts: "Subreddit R/X: Post 1, Post 2... Subreddit R/Y: ..."
     history_str = ""
@@ -64,12 +97,8 @@ def get_schwartz_vector_chameleon(user_id, contextual_posts):
       "UNIVERSALISM": 0.0, "BENEVOLENCE": 0.0, "TRADITION": 0.0, "CONFORMITY": 0.0, "SECURITY": 0.0
     }}
     """
-    try:
-        resp = client.chat.completions.create(model="qwen3", messages=[{"role": "user", "content": prompt}])
-        return extract_json(resp.choices[0].message.content)
-    except Exception as e:
-        print(f"Error getting vector for {user_id}: {e}")
-        return None
+    resp = client.chat.completions.create(model="qwen3", messages=[{"role": "user", "content": prompt}])
+    return extract_json(resp.choices[0].message.content)
 
 def main():
     print(f"Starting enrichment from {INPUT_FILE} to {OUTPUT_FILE}...")

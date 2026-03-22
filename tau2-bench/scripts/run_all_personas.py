@@ -18,7 +18,30 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+
+def run_with_retry(cmd: list, env: dict, cwd: Path, max_retries: int = 9, initial_delay: float = 2.0, backoff_factor: float = 2.0) -> int:
+    """Run command with exponential backoff on non-zero exit. Returns exit code (0 on success)."""
+    delay = initial_delay
+    # Auto-answer "y" to tau2's resume prompts (file exists, and optionally config changed) so runs are non-interactive
+    stdin_input = "y\ny\n"
+    for attempt in range(max_retries):
+        result = subprocess.run(cmd, env=env, cwd=cwd, input=stdin_input, text=True)
+        if result.returncode == 0:
+            return 0
+        if attempt == max_retries - 1:
+            return result.returncode
+        print(f"  Attempt {attempt + 1}/{max_retries} failed (exit {result.returncode}). Retrying in {delay:.1f}s...", file=sys.stderr)
+        time.sleep(delay)
+        delay = min(delay * backoff_factor, 120.0)
+    return result.returncode
+
+
+def to_fs_label(value: str) -> str:
+    """Map model/provider strings to a stable filesystem-safe label."""
+    return value.replace("/", "__")
 
 
 def main() -> None:
@@ -41,7 +64,7 @@ def main() -> None:
         "--eval-dir",
         type=Path,
         default=None,
-        help="Base dir for outputs, e.g. .../reddit/Eval. Each model gets a subdir: <eval_dir>/<model>/.",
+        help="Base dir for outputs (e.g. .../reddit/Eval/airline). Use --eval-dir /path with no spaces around '='.",
     )
     parser.add_argument(
         "--domain",
@@ -77,6 +100,18 @@ def main() -> None:
         help="Print commands and copy targets only, do not run.",
     )
     parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip (model, persona) pairs that already have output in <eval_dir>/<model>/<persona>_<model>.json.",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=9,
+        metavar="N",
+        help="Retry each tau2 run up to N times on failure with exponential backoff (default: 3).",
+    )
+    parser.add_argument(
         "extra",
         nargs="*",
         help="Extra args passed to 'tau2 run' (e.g. --max-steps 50).",
@@ -92,8 +127,18 @@ def main() -> None:
         args.simulations_dir = repo_root / "data" / "simulations"
 
     args.personas_dir = args.personas_dir.resolve()
+    if str(args.eval_dir).strip() in ("", "="):
+        print(
+            "Invalid --eval-dir (did you use spaces? Use: --eval-dir /path or --eval-dir=/path)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     args.eval_dir = args.eval_dir.resolve()
     args.simulations_dir = args.simulations_dir.resolve()
+
+    if args.eval_dir.exists() and not args.eval_dir.is_dir():
+        print(f"Eval dir is not a directory: {args.eval_dir}", file=sys.stderr)
+        sys.exit(1)
 
     if not args.personas_dir.is_dir():
         print(f"Personas dir not found: {args.personas_dir}", file=sys.stderr)
@@ -120,15 +165,16 @@ def main() -> None:
 
     for model in args.models:
         agent_llm = f"openai/{model}" if "/" not in model else model
-        model_dir = args.eval_dir / model
+        model_label = to_fs_label(model)
+        model_dir = args.eval_dir / model_label
         if not args.dry_run:
             model_dir.mkdir(parents=True, exist_ok=True)
 
         for persona_path in persona_files:
             persona_stem = persona_path.stem
-            save_to = f"{model}_{persona_stem}"
+            save_to = f"{model_label}_{persona_stem}_{args.domain}"
             run_save_path = args.simulations_dir / f"{save_to}.json"
-            dest_path = model_dir / f"{persona_stem}_{model}.json"
+            dest_path = model_dir / f"{persona_stem}_{model_label}_{args.domain}.json"
 
             env = os.environ.copy()
             env["TAU2_PERSONA_FILE"] = str(persona_path.resolve())
@@ -141,17 +187,22 @@ def main() -> None:
                 print(f"  -> copy to {dest_path}\n")
                 continue
 
+            if args.skip_existing and dest_path.exists():
+                print(f"Skipping model={model} persona={persona_stem} (already exists: {dest_path})")
+                continue
+
             print(f"Running model={model} persona={persona_stem} ...")
-            result = subprocess.run(cmd, env=env, cwd=repo_root)
-            if result.returncode != 0:
-                print(f"tau2 run failed for {model} / {persona_stem}", file=sys.stderr)
-                sys.exit(result.returncode)
+            exit_code = run_with_retry(cmd, env, repo_root, max_retries=args.max_retries)
+            if exit_code != 0:
+                print(f"tau2 run failed for {model} / {persona_stem} after {args.max_retries} attempt(s)", file=sys.stderr)
+                sys.exit(exit_code)
 
             if run_save_path.exists():
                 shutil.copy2(run_save_path, dest_path)
                 print(f"  -> {dest_path}")
             else:
                 print(f"  Warning: run output not found at {run_save_path}", file=sys.stderr)
+                
 
     print("Done.")
 

@@ -8,7 +8,7 @@ from functools import wraps
 from dataclasses import dataclass
 from cleanpersona import _clean_persona
 persona_model = OpenAIServerModel(
-        model_id="gpt-oss",
+        model_id="qwen3",
         api_base="https://ellm.nrp-nautilus.io/v1",
         api_key=os.getenv("NAUT_API_KEY"),
     )
@@ -49,11 +49,11 @@ Generate a persona definition that is self-explanatory. The persona description 
 Do not write specific rules (e.g., 'Do not give zip code'). Instead, write the psychological reasoning (e.g., 'He is deeply skeptical of digital surveillance and treats personal data as a currency to be hoarded').
 
 === INPUT DATA ===
-1. DEMOGRAPHIC ANCHOR:
-{anchor_demographics}
+1. SUBREDDITS:
+{subreddits}
 
-2. PSYCHOLOGICAL SHIFT (Context: r/{subreddit}):
-{psych_vector_str}
+2. PSYCHOLOGICAL SHIFT:
+{target_vector}
 
 3. BEHAVIORAL SAMPLES:
 {history_str}
@@ -100,7 +100,6 @@ class PersonaDataInst:
     
     # INPUTS FOR THE AGENT
     posts: list[str]         # The 5 posts from THIS subreddit only
-    anchor_demographics: str # "28M, Developer, St. Louis" (extracted globally)
     shift_vector: dict       # {"POWER": 0.8, ...} (extracted locally from these posts)
     
     # GROUND TRUTH (For Evaluation)
@@ -109,13 +108,35 @@ class PersonaDataInst:
 
 
 
+
+@dataclass
+class PersonaDataInst_GEPA:
+    user_id: str             # "lumenation"
+    subreddits: list[str]           # "r/KotakuInAction" (The Context)
+    
+    # INPUTS FOR THE AGENT
+    history: str         # The 5 posts from THIS subreddit only
+    target_vector: dict       # {"POWER": 0.8, ...} (extracted locally from these posts)
+    
+def format_history_for_prompt(history_list: list[dict]) -> str:
+    formatted_str = ""
+    for entry in history_list:
+        sub = entry['subreddit']
+        posts = "\n- ".join(entry['posts'])
+        formatted_str += f"\n[Subreddit: r/{sub}]\n- {posts}\n"
+    return formatted_str
+
 def load_persona_dataset(path: str) -> list[PersonaDataInst]:
     with open(path, "r") as f:
         examples: list[PersonaDataInst] = []
         for row in f:
             try:
                 data = json.loads(row)
-                examples.append(PersonaDataInst(user_id=data["user_id"], subreddit=data["subreddit"], posts=data["posts"], anchor_demographics=data["anchor_demographics"], shift_vector=data["shift_vector"], target_vector=data["target_vector"]))
+                history = data["history"]
+                formatted_history = format_history_for_prompt(history)
+                target_vector = data["target_vector"]
+
+                examples.append(PersonaDataInst_GEPA(user_id=data["user_id"], subreddits=data["subreddits"], history=formatted_history, target_vector=str(target_vector)))
             except Exception as e:
                 print(f"Error loading row: {e}")
                 continue
@@ -132,12 +153,11 @@ if __name__ == "__main__":
     #validation_personas.jsonl - write userID+generated persona as {userID: persona}
 
     # trainset = load_persona_dataset("train_gdelt_enriched.jsonl")
-    testset = load_persona_dataset("personasforpaper.jsonl")
+    testset = load_persona_dataset("/home/pgen/personagen/multiagent_human_worker/reddit/ScaledPersonas/archetypes_to_simulate.jsonl")
     total_users = len(testset)
-    print(f"Loaded {testset} users from test.jsonl")
-    
+    print(f"Loaded {total_users} users from test.jsonl")
     # Load existing user_ids from output file to skip already processed users
-    output_file = "reddit_personas.jsonl"
+    output_file = "/home/pgen/personagen/multiagent_human_worker/reddit/ScaledPersonas/GEPAprompted.jsonl"
     
     
     print(f"Starting persona generation...\n")
@@ -154,11 +174,10 @@ if __name__ == "__main__":
             try:
                 print(f"[{i+1}/{total_users}] Processing user: {user_id}...", end=" ", flush=True)
 
-                anchor_demographics = testset[i].anchor_demographics
-                subreddit = testset[i].subreddit
-                psych_vector_str = testset[i].shift_vector
-                posts = testset[i].posts
-                prompt = REDDIT_PROMPT.format(history_str=posts, anchor_demographics=anchor_demographics, subreddit=subreddit, psych_vector_str=psych_vector_str)
+                subreddits = testset[i].subreddits
+                history = testset[i].history
+                target_vector = testset[i].target_vector
+                prompt = REDDIT_PROMPT.format(history_str=history, subreddits=subreddits, target_vector=target_vector)
                 response_message = call_persona_model(prompt)
                 persona_description = _clean_persona(response_message)
 
@@ -182,8 +201,8 @@ if __name__ == "__main__":
                 f.flush()  # Ensure data is written immediately
                 
                 successful += 1
-                if i == 10:
-                    break
+                # if i == 1:
+                #     break
                 print(f"✓ Success")
                 
             except Exception as e:

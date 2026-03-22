@@ -46,7 +46,6 @@ def retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff
 
 
 
-
 REDDIT_PROMPT = """
 You are an expert Psychological Profiler.
 Generate a persona definition that is self-explanatory. The persona description must be so coherent and psychologically vivid that an AI acting as this person will naturally deduce how to behave in any situation purely by reading the description.
@@ -54,11 +53,11 @@ Generate a persona definition that is self-explanatory. The persona description 
 Do not write specific rules (e.g., 'Do not give zip code'). Instead, write the psychological reasoning (e.g., 'He is deeply skeptical of digital surveillance and treats personal data as a currency to be hoarded').
 
 === INPUT DATA ===
-1. DEMOGRAPHIC ANCHOR:
-{anchor_demographics}
+1. SUBREDDITS:
+{subreddits}
 
-2. PSYCHOLOGICAL SHIFT (Context: r/{subreddit}):
-{psych_vector_str}
+2. PSYCHOLOGICAL SHIFT:
+{target_vector}
 
 3. BEHAVIORAL SAMPLES:
 {history_str}
@@ -81,10 +80,24 @@ You must output the persona in the following strict format:
   ...
 }}
 
+ 
+### 4. INTERNAL MONOLOGUE STYLE
+Describe how this person thinks. The description must:
+- State clearly that the internal monologue must explicitly name Schwartz values by name
+ and with their exact numerical values when making decisions or reasoning.
+- Include exactly two examples of internal monologue thoughts, each on a new line and pr
+efixed with "Example 1: " and "Example 2: " respectively.
+- Each example must contain at least one reference to a Schwartz value in the format: "M
+y [Value] value of [number] ..." or "My [Value] value ([number]) ...", using the exact n
+umerical values provided in the input.
+- The examples must be realistic for the current context and must demonstrate the use o
+f multiple Schwartz values if applicable.
+
 === YOUR RESPONSE ===
 """
 
-CLAUDE_PROMPT = """
+
+YAML_PROMPT = """
 You are an expert Persona Compiler for Multi-Agent Simulation Environments. Your objective is to ingest raw, narrative-heavy human personas and compile them into strict, machine-readable YAML behavioral specifications. 
 
 These YAML specifications will be used to govern the behavior of a simulated user interacting with a target agent in an objective, state-tracking benchmark (e.g., Dec-POMDP environments like Tau-bench).
@@ -127,10 +140,12 @@ state_transition_rules:
   - "IF the agent makes a mistake, THEN [Specific behavioral reaction]"
   - "[Add 1-2 more IF/THEN rules specific to this persona's dominant Schwartz values]"
 
-termination_conditions:
-  success: "The final database state matches the initial goal."
-  abandonment: "[Specific condition where this persona gives up, e.g., 'Agent repeats the same question 3 times' or 'Task takes more than 5 turns']"
 """
+
+
+# termination_conditions:
+#   success: "The final database state matches the initial goal."
+#   abandonment: "[Specific condition where this persona gives up, e.g., 'Agent repeats the same question 3 times' or 'Task takes more than 5 turns']"
 
 CONFORMANCE_PROMPT = """
 You are an Automated Conformance Evaluator for Multi-Agent Behavioral Specs.
@@ -148,49 +163,142 @@ Analyze the YAML against the source values and output a JSON evaluation with bin
 1. Dominant Values Check: Identify the top 2 highest Schwartz values in INPUT A. Does the YAML explicitly codify behavioral policies, triggers, or tone that manifest these specific dominant values? 
 2. Inferior Values Check: Identify the 1 lowest Schwartz value in INPUT A. Does the YAML explicitly show a lack of concern, or resistance, related to this lowest value?
 3. State-Transition Verifiability: Do the state_transition_rules contain strict "IF/THEN" behavioral heuristics rather than vague narrative guidelines?
-4. Termination Bounds Check: Are there strict, numerical bounds on when the persona abandons the task (e.g., specific turn limits, repetition limits)?
 
 OUTPUT FORMAT (output ONLY valid JSON, no preamble):
 {{
   "Dominant_Values_Check": {{"pass": true/false, "identified_values": "[List the 2 values]", "reason": "..."}},
   "Inferior_Value_Check": {{"pass": true/false, "identified_value": "[List the 1 value]", "reason": "..."}},
   "State_Transition_Check": {{"pass": true/false, "reason": "..."}},
-  "Termination_Check": {{"pass": true/false, "reason": "..."}},
   "OVERALL_STATUS": "APPROVE or REJECT"
 }}
 """
-
-
-
+# 4. Termination Bounds Check: Are there strict, numerical bounds on when the persona abandons the task (e.g., specific turn limits, repetition limits)?
+#   "Termination_Check": {{"pass": true/false, "reason": "..."}},
 
 @dataclass
-class PersonaDataInst:
+class PersonaDataInst_Synthetic:
+    id: str
+    persona: dict
+    schwartz_values: dict  # for conformance check (e.g. CONFORMITY, SECURITY, ...)
+
+@dataclass
+class PersonaDataInst_Scaled:
+    user_id: str
+    persona: dict
+
+@dataclass
+class PersonaDataInst_GEPA:
     user_id: str             # "lumenation"
-    subreddit: str           # "r/KotakuInAction" (The Context)
+    subreddits: list[str]           # "r/KotakuInAction" (The Context)
     
     # INPUTS FOR THE AGENT
-    posts: list[str]         # The 5 posts from THIS subreddit only
-    anchor_demographics: str # "28M, Developer, St. Louis" (extracted globally)
-    shift_vector: dict       # {"POWER": 0.8, ...} (extracted locally from these posts)
+    history: str         # The 5 posts from THIS subreddit only
+    target_vector: dict       # {"POWER": 0.8, ...} (extracted locally from these posts)
     
-    # GROUND TRUTH (For Evaluation)
-    # We test if the agent matches THIS vector, not the global average
-    target_vector: dict      # Same as shift_vector
+def format_history_for_prompt(history_list: list[dict]) -> str:
+    formatted_str = ""
+    for entry in history_list:
+        sub = entry['subreddit']
+        posts = "\n- ".join(entry['posts'])
+        formatted_str += f"\n[Subreddit: r/{sub}]\n- {posts}\n"
+    return formatted_str
 
 
+def _persona_dict_to_description(persona: dict) -> str:
+    """Format synthetic persona dict as a string for the YAML compiler."""
+    parts = []
+    if "core_identity" in persona:
+        ci = persona["core_identity"]
+        parts.append("### 1. CORE IDENTITY")
+        parts.append(
+            f"I am a {ci.get('age', '?')} year old {ci.get('occupation', '')} in {ci.get('location', '')}. "
+            f"{ci.get('worldview_and_personality', '')}"
+        )
+    if "psychological_drivers" in persona:
+        parts.append("\n### 2. PSYCHOLOGICAL DRIVERS")
+        parts.append(persona["psychological_drivers"])
+    if "schwartz_values" in persona:
+        parts.append("\n### 3. SCHWARTZ VALUES (JSON)")
+        parts.append("```json\n" + json.dumps(persona["schwartz_values"], indent=2) + "\n```")
+    if "internal_monologue_style" in persona:
+        parts.append("\n### 4. INTERNAL MONOLOGUE STYLE")
+        parts.append(persona["internal_monologue_style"])
+    return "\n".join(parts) if parts else json.dumps(persona, indent=2)
 
-def load_persona_dataset(path: str) -> list[PersonaDataInst]:
-    with open(path, "r", encoding="utf-8") as f:
-        examples: list[PersonaDataInst] = []
+
+def load_persona_dataset_synthetic(path: str) -> list[PersonaDataInst_Synthetic]:
+    with open(path, "r") as f:
+        examples: list[PersonaDataInst_Synthetic] = []
         for row in f:
+            row = row.strip()
+            if not row:
+                continue
             try:
                 data = json.loads(row)
-                examples.append(PersonaDataInst(user_id=data["user_id"], subreddit=data["subreddit"], posts=data["posts"], anchor_demographics=data["anchor_demographics"], shift_vector=data["shift_vector"], target_vector=data["target_vector"]))
+                persona = data["persona"]
+                schwartz = persona.get("schwartz_values", {}) if isinstance(persona, dict) else {}
+                examples.append(
+                    PersonaDataInst_Synthetic(
+                        id=data["id"],
+                        persona=persona,
+                        schwartz_values=schwartz,
+                    )
+                )
             except Exception as e:
                 print(f"Error loading row: {e}")
                 continue
     return examples
 
+def load_persona_dataset(path: str) -> list[PersonaDataInst_GEPA]:
+    with open(path, "r") as f:
+        examples: list[PersonaDataInst_GEPA] = []
+        for row in f:
+            try:
+                data = json.loads(row)
+                history = data["history"]
+                formatted_history = format_history_for_prompt(history)
+                target_vector = data["target_vector"]
+
+                examples.append(PersonaDataInst_GEPA(user_id=data["user_id"], subreddits=data["subreddits"], history=formatted_history, target_vector=str(target_vector)))
+            except Exception as e:
+                print(f"Error loading row: {e}")
+                continue
+    return examples
+
+
+def load_scaled_persona_dataset(path: str) -> list[PersonaDataInst_Scaled]:
+    with open(path, "r") as f:
+        examples: list[PersonaDataInst_Scaled] = []
+        for row in f:
+            try:
+                data = json.loads(row)
+                examples.append(PersonaDataInst_Scaled(user_id=data["user_id"], persona=data["persona"]))
+            except Exception as e:
+                print(f"Error loading row: {e}")
+                continue
+    return examples
+
+
+def load_existing_user_ids(path: str) -> set[str]:
+    """Load user_ids from an existing JSONL output file."""
+    existing_ids: set[str] = set()
+    if not os.path.exists(path):
+        return existing_ids
+
+    with open(path, "r", encoding="utf-8") as f:
+        for row in f:
+            row = row.strip()
+            if not row:
+                continue
+            try:
+                data = json.loads(row)
+                user_id = data.get("user_id")
+                if user_id:
+                    existing_ids.add(user_id)
+            except Exception:
+                # Ignore malformed rows to keep resume robust.
+                continue
+    return existing_ids
 
 @retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0)
 def call_persona_model(prompt: str) -> str:
@@ -218,7 +326,7 @@ def extract_schwartz_json(persona_text: str) -> dict:
 
 @retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0)
 def compile_persona(persona_description: str, critique: str = None) -> str:
-    prompt = CLAUDE_PROMPT
+    prompt = YAML_PROMPT
     if critique:
         prompt += (
             "\n\n=== REVISION CONSTRAINTS (must address before outputting YAML) ===\n"
@@ -265,16 +373,29 @@ def extract_critique(conformance_result: dict) -> str:
 if __name__ == "__main__":
 
     #validation_personas.jsonl - write userID+generated persona as {userID: persona}
+    # synthetic_personas = load_persona_dataset_synthetic("/home/pgen/personagen/multiagent_human_worker/reddit/SyntheticPersonas/fakepersonas.jsonl")
+    # total_users = len(synthetic_personas)
+    # print(f"Loaded {total_users} users from fakepersonas.jsonl")
 
     # trainset = load_persona_dataset("train_gdelt_enriched.jsonl")
-    testset = load_persona_dataset("H:/multiagent_human_worker/reddit/personasforpaper.jsonl")
+   
+   
+    testset = load_scaled_persona_dataset(
+        "/home/pgen/personagen/multiagent_human_worker/reddit/ScaledPersonas/GEPAprompted.jsonl"
+    )
     total_users = len(testset)
-    print(f"Loaded {testset} users from personasforpaper.jsonl")
+    print(f"Loaded {total_users} users from GEPAprompted.jsonl")
+    # print(f"Loaded {total_users} users from GEPAprompted.jsonl")
     
-    # Load existing user_ids from output file to skip already processed users
-    output_file = "pipeline_personas.jsonl"
-    eval_folder = "H:/multiagent_human_worker/reddit/eval_personas"
+   # # Load existing user_ids from output file to skip already processed users
+    # output_file = "/home/pgen/personagen/multiagent_human_worker/reddit/ClusteredPersonas/pipelinedpersona.jsonl"
+    # eval_folder = "/home/pgen/personagen/multiagent_human_worker/reddit/ClusteredPersonas/EvalYaml"
+    
+    output_file = "/home/pgen/personagen/multiagent_human_worker/reddit/ScaledPersonas/pipelinedpersona.jsonl"
+    eval_folder = "/home/pgen/personagen/multiagent_human_worker/reddit/ScaledPersonas/YAML"
     os.makedirs(eval_folder, exist_ok=True)
+    existing_user_ids = load_existing_user_ids(output_file)
+    print(f"Found {len(existing_user_ids)} existing users in pipelinedpersona.jsonl")
 
     
     
@@ -287,41 +408,44 @@ if __name__ == "__main__":
     skipped = 0
     edge_case_failures = []
 
+# user_id: str             # "lumenation"
+#     subreddits: list[str]           # "r/KotakuInAction" (The Context)
+    
+#     # INPUTS FOR THE AGENT
+#     history: str         # The 5 posts from THIS subreddit only
+#     target_vector: dict       # {"POWER": 0
+
     with open(output_file, "a", encoding="utf-8") as f:
         for i in range(len(testset)):
-            user_id = testset[i].user_id
-            # yaml_file = f"{eval_folder}/{user_id}.yaml" #yaml file for the persona
-            yaml_output_path = os.path.join(eval_folder, f"{user_id}.yaml")
+            inst = testset[i]
+            persona_id = inst.user_id
+            if persona_id in existing_user_ids:
+                skipped += 1
+                print(f"\n[{i+1}/{total_users}] Skipping existing user: {persona_id}")
+                continue
+            schwartz_json = extract_schwartz_json(str(inst.persona))
+        #     subreddits = inst.subreddits
+        #     history = inst.history
+        #     target_vector = inst.target_vector
+        #     schwartz_json = json.dumps(inst.target_vector, indent=2)
+            persona_description = str(inst.persona)
+            persona = persona_description
+            yaml_output_path = os.path.join(eval_folder, f"{persona_id}.yaml")
 
             try:
-                print(f"[{i+1}/{total_users}] Processing user: {user_id}...", end=" ", flush=True)
-
-                anchor_demographics = testset[i].anchor_demographics
-                subreddit = testset[i].subreddit
-                psych_vector_str = testset[i].shift_vector
-                posts = testset[i].posts
-
-                prompt = REDDIT_PROMPT.format(
-                    history_str=posts,
-                    anchor_demographics=anchor_demographics,
-                    subreddit=subreddit,
-                    psych_vector_str=psych_vector_str,
-                )
-                response_message = call_persona_model(prompt)
-                persona_description = _clean_persona(response_message)
-
-                schwartz_json = extract_schwartz_json(persona_description)
-                if not schwartz_json:
-                    schwartz_json = testset[i].target_vector
-
                 # k=3 compile → conformance → critique retry loop
                 critique = None
                 conformance_result = None
                 approved = False
 
                 for attempt in range(MAX_CONFORMANCE_RETRIES):
+                    print(
+                        f"  → compile_persona attempt {attempt + 1}/{MAX_CONFORMANCE_RETRIES} ...",
+                        flush=True,
+                    )
                     yaml_content = compile_persona(persona_description, critique=critique)
 
+                    print(f"  → conformance check ...", flush=True)
                     conformance_result = call_conformance_model(
                         CONFORMANCE_PROMPT.format(schwartz_json=schwartz_json, yaml_file=yaml_content)
                     )
@@ -339,25 +463,23 @@ if __name__ == "__main__":
                     print(f"  Critique: {critique}")
 
                 if not approved:
-                    print(f"  EDGE CASE: {user_id} failed conformance after {MAX_CONFORMANCE_RETRIES} attempts — logging.")
+                    print(f"  EDGE CASE: {persona_id} failed conformance after {MAX_CONFORMANCE_RETRIES} attempts — logging.")
                     edge_case_failures.append({
-                        "user_id": user_id,
+                        "user_id": persona_id,
                         "last_conformance": conformance_result,
                     })
                     failed += 1
                     continue
 
                 # Write the yaml file to the eval_folder so we can evaluate the personas after the pipeline
-                yaml_output_path = os.path.join(eval_folder, f"{user_id}.yaml")
                 with open(yaml_output_path, "w", encoding="utf-8") as file2:
                     file2.write(yaml_content)
 
-                f.write(json.dumps({"user_id": user_id, "persona": persona_description, "yaml": yaml_output_path}, ensure_ascii=False) + "\n")
+                f.write(json.dumps({"user_id": persona_id, "persona": persona, "yaml": yaml_output_path}, ensure_ascii=False) + "\n")
                 f.flush()
+                existing_user_ids.add(persona_id)
 
                 successful += 1
-                # if i == 1:
-                #     break
                 print(f"  ✓ Success")
 
             except Exception as e:
