@@ -8,11 +8,72 @@ from functools import wraps
 from dataclasses import dataclass
 from cleanpersona import _clean_persona
 
+# HTTP timeouts: NRP/ellm can be slow or stall; without a read timeout the client may hang
+# for a very long time. Tune with env vars. (Your physical location does not matter —
+# requests go from *this machine* (the VM) to the API; laptop "internet working" is unrelated.)
+# Large models (e.g. Qwen 397B) + YAML compile often exceed 5–10 min; 300s default caused frequent timeouts.
+_connect_s = float(os.getenv("LLM_CONNECT_TIMEOUT_SEC", "30"))
+_read_s = float(os.getenv("LLM_READ_TIMEOUT_SEC", "1200"))  # 20 min default; raise if you still see timeouts
+try:
+    import httpx
+
+    _llm_http_timeout: Any = httpx.Timeout(connect=_connect_s, read=_read_s, write=120.0, pool=60.0)
+except Exception:
+    _llm_http_timeout = max(_connect_s, _read_s)
+
+# Qwen3.5 on NRP may return chain-of-thought in `reasoning` with `content` null.
+_LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "16384"))
+
 persona_model = OpenAIServerModel(
-        model_id="qwen3",
-        api_base="https://ellm.nrp-nautilus.io/v1",
-        api_key=os.getenv("NAUT_API_KEY"),
+    model_id="gpt-oss",
+    api_base="https://ellm.nrp-nautilus.io/v1",
+    api_key=os.getenv("NAUT_API_KEY"),
+    max_tokens=_LLM_MAX_TOKENS,
+    # OpenAI SDK retries + long default timeouts can look like an infinite hang; cap explicitly.
+    client_kwargs={
+        "timeout": _llm_http_timeout,
+        "max_retries": int(os.getenv("OPENAI_CLIENT_MAX_RETRIES", "0")),
+    },
+)
+
+
+def _assistant_text(msg: Any) -> str:
+    """Extract assistant text from smolagents ChatMessage (content and/or reasoning fields)."""
+    if msg is None:
+        return ""
+    c = getattr(msg, "content", None)
+    if c:
+        return str(c)
+    raw = getattr(msg, "raw", None)
+    if raw is not None:
+        try:
+            m = raw.choices[0].message
+            for attr in ("reasoning", "reasoning_content"):
+                if getattr(m, attr, None):
+                    return str(getattr(m, attr))
+            if hasattr(m, "model_dump"):
+                d = m.model_dump()
+                for k in ("reasoning", "reasoning_content", "content"):
+                    if d.get(k):
+                        return str(d[k])
+        except Exception:
+            pass
+    return ""
+
+
+def _maybe_truncate_persona(text: str, user_id: str) -> str:
+    """Optionally cap persona size — very long inputs make compile slow and can hit context limits."""
+    max_chars = os.getenv("MAX_PERSONA_CHARS")
+    if not max_chars:
+        return text
+    limit = int(max_chars)
+    if len(text) <= limit:
+        return text
+    print(
+        f"  WARNING: persona for {user_id} is {len(text)} chars; truncating to {limit} (set MAX_PERSONA_CHARS to change).",
+        flush=True,
     )
+    return text[:limit] + "\n\n[... truncated by MAX_PERSONA_CHARS ...]\n"
 
 
 
@@ -303,7 +364,7 @@ def load_existing_user_ids(path: str) -> set[str]:
 @retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0)
 def call_persona_model(prompt: str) -> str:
     response_message = persona_model([{"role": "user", "content": prompt}])
-    return response_message.content or ""
+    return _assistant_text(response_message) or ""
 
 
 def extract_schwartz_json(persona_text: str) -> dict:
@@ -341,7 +402,7 @@ def compile_persona(persona_description: str, critique: str = None) -> str:
 @retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0)
 def call_conformance_model(prompt: str) -> dict:
     response = persona_model([{"role": "user", "content": prompt}])
-    text = response.content or ""
+    text = _assistant_text(response) or ""
     match = re.search(r'\{.*\}', text, re.DOTALL)
     if match:
         try:
@@ -400,6 +461,10 @@ if __name__ == "__main__":
     
     
     print(f"Starting pipeline...\n")
+    print(
+        f"LLM timeouts: connect={_connect_s}s read={_read_s}s (env LLM_CONNECT_TIMEOUT_SEC / LLM_READ_TIMEOUT_SEC)\n",
+        flush=True,
+    )
     
     MAX_CONFORMANCE_RETRIES = 3
 
@@ -421,7 +486,7 @@ if __name__ == "__main__":
             persona_id = inst.user_id
             if persona_id in existing_user_ids:
                 skipped += 1
-                print(f"\n[{i+1}/{total_users}] Skipping existing user: {persona_id}")
+                print(f"\n[{i+1}/{total_users}] Skipping existing user: {persona_id}", flush=True)
                 continue
             schwartz_json = extract_schwartz_json(str(inst.persona))
         #     subreddits = inst.subreddits
@@ -429,8 +494,17 @@ if __name__ == "__main__":
         #     target_vector = inst.target_vector
         #     schwartz_json = json.dumps(inst.target_vector, indent=2)
             persona_description = str(inst.persona)
+            persona_description = _maybe_truncate_persona(persona_description, persona_id)
             persona = persona_description
             yaml_output_path = os.path.join(eval_folder, f"{persona_id}.yaml")
+            _raw_len = len(str(inst.persona))
+            _prompt_len = len(YAML_PROMPT) + _raw_len + 200
+            print(
+                f"\n[{i+1}/{total_users}] Processing: {persona_id} "
+                f"(persona ~{_raw_len} chars, full compile prompt ~{_prompt_len} chars; "
+                f"~{_prompt_len // 4} tok rough guess)",
+                flush=True,
+            )
 
             try:
                 # k=3 compile → conformance → critique retry loop
@@ -443,7 +517,9 @@ if __name__ == "__main__":
                         f"  → compile_persona attempt {attempt + 1}/{MAX_CONFORMANCE_RETRIES} ...",
                         flush=True,
                     )
+                    _t0 = time.perf_counter()
                     yaml_content = compile_persona(persona_description, critique=critique)
+                    print(f"  → compile_persona finished in {time.perf_counter() - _t0:.1f}s", flush=True)
 
                     print(f"  → conformance check ...", flush=True)
                     conformance_result = call_conformance_model(
