@@ -21,6 +21,26 @@ import time
 from functools import wraps
 from tau_bench.run_gepa_eval import run_evaluation, clean_transcript_for_judge
 import random
+from alignment import schwartz_alignment
+
+# ---------------------------------------------------------------------------
+# Rework configuration (AAAI). These constants ARE the ablation ladder:
+# toggling them and re-running GEPA produces the unoptimized / value-only /
+# behavior-only / full arms. Weights are read at module load.
+# ---------------------------------------------------------------------------
+USE_TAU = bool(int(os.getenv("USE_TAU", "1")))            # behavioral interaction signal
+USE_UTILITY = bool(int(os.getenv("USE_UTILITY", "1")))    # held-out behavioral prediction
+USE_GROUNDING_GATE = bool(int(os.getenv("USE_GROUNDING_GATE", "1")))  # anti-hallucination gate
+SIMILARITY_METRIC = os.getenv("SIMILARITY_METRIC", "cosine")  # "cosine" | "spearman"
+
+# Combined-score weights for the value / behavioral / utility signals.
+W_ALIGN = float(os.getenv("W_ALIGN", "0.4"))
+W_TAU = float(os.getenv("W_TAU", "0.3"))
+W_UTILITY = float(os.getenv("W_UTILITY", "0.3"))
+
+# Offline structural validation: stub every LLM/encoder call with deterministic
+# values so the GEPA scoring pipeline runs without NAUT_API_KEY / heavy models.
+MOCK_LLM = bool(os.getenv("MOCK_LLM"))
 
 def retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0):
     """Decorator to retry a function with exponential backoff on timeout or connection errors."""
@@ -79,8 +99,12 @@ class GEPACompatibleModel:
 
 
 
-eval_model = SentenceTransformer("all-mpnet-base-v2")
-nli_model = CrossEncoder('cross-encoder/nli-deberta-v3-base')
+if MOCK_LLM:
+    eval_model = None
+    nli_model = None
+else:
+    eval_model = SentenceTransformer("all-mpnet-base-v2")
+    nli_model = CrossEncoder('cross-encoder/nli-deberta-v3-base')
 
 
 # Custom HTTP client that skips SSL verification (for Nautilus SSL issues)
@@ -106,17 +130,30 @@ teacher_model = GEPACompatibleModel(teacher_model_raw)
 
 @dataclass
 class PersonaDataInst:
-    user_id: str             # "lumenation"
-    subreddit: str           # "r/KotakuInAction" (The Context)
-    
-    # INPUTS FOR THE AGENT
-    posts: list[str]         # The 5 posts from THIS subreddit only
-    anchor_demographics: str # "28M, Developer, St. Louis" (extracted globally)
-    shift_vector: dict       # {"POWER": 0.8, ...} (extracted locally from these posts)
-    
-    # GROUND TRUTH (For Evaluation)
-    # We test if the agent matches THIS vector, not the global average
-    target_vector: dict      # Same as shift_vector
+    # Per-user record (v2 schema). One persona per user, grounded in their
+    # cross-subreddit history; the Schwartz vector is the source-conditioned
+    # construct and `heldout` is the behavioral-prediction target.
+    user_id: str
+    subreddits: list[str]            # all subreddits the user is active in
+    history: list[dict]              # [{"subreddit": str, "posts": [str]}, ...] (held-out removed)
+    demographics: dict               # {age, gender, occupation, location} (inferred upstream)
+    heldout: dict                    # {"subreddit": str, "post": str} behavioral target
+    target_vector: dict              # 10-dim Schwartz [0,1], re-inferred on held-out-removed corpus
+
+    @property
+    def shift_vector(self) -> dict:
+        """Back-compat alias; the source-conditioned value vector."""
+        return self.target_vector
+
+    @property
+    def posts(self) -> list[str]:
+        """Flattened posts across subreddits (held-out post already removed)."""
+        return [p for item in self.history for p in item.get("posts", [])]
+
+    @property
+    def anchor_demographics(self) -> dict:
+        """Back-compat alias for the inferred demographics dict."""
+        return self.demographics
 @dataclass
 class PersonaTrajectory:
     """Trajectory for one evaluation; must match constructor call in evaluate()."""
@@ -130,7 +167,9 @@ class PersonaTrajectory:
     shift_vector: dict | None = None
     agent_vector: dict | None = None  # PVQ results from _administer_pvq_test
     tau_result: dict | None = None  # Stores {'score': 4, 'critique': '...'}
-    combined_score: float = 0.0  # Combined score: 50% PVQ + 50% Tau
+    grounding_score: float = 1.0  # anti-hallucination gate (persona vs posts)
+    utility_score: float = 0.0    # held-out behavioral prediction
+    combined_score: float = 0.0  # weighted: value alignment + tau + utility, gated by grounding
 
     @property
     def total_score(self) -> float:
@@ -164,8 +203,10 @@ Do not write specific rules (e.g., 'Do not give zip code'). Instead, write the p
 1. DEMOGRAPHIC ANCHOR:
 {anchor_demographics}
 
-2. PSYCHOLOGICAL SHIFT (Context: r/{subreddit}):
+2. INFERRED PSYCHOLOGICAL PROFILE (latent grounding from r/{subreddit}):
 {psych_vector_str}
+(Use this profile ONLY to shape behavior. Do NOT name these values or print any
+numbers in your output — a coherent person never recites their own value scores.)
 
 3. BEHAVIORAL SAMPLES:
 {history_str}
@@ -177,29 +218,17 @@ You must output the persona in the following strict format:
 (A first-person introduction: "I am a [Age] year old [Job]...")
 
 ### 2. PSYCHOLOGICAL DRIVERS
-(A narrative explanation of *why* they act the way they do. Connect their background to their values.)
+(A narrative explanation of *why* they act the way they do. Connect their background and
+lived experience to their priorities — expressed in plain language, never as named
+psychological values or numeric scores.)
 
-### 3. SCHWARTZ VALUES (JSON)
-(Provide the raw values in a valid JSON block for parsing)
-```json
-{{
-  "Security": 0.8,
-  "Conformity": 0.4,
-  ...
-}}
-
- 
-### 4. INTERNAL MONOLOGUE STYLE
-Describe how this person thinks. The description must:
-- State clearly that the internal monologue must explicitly name Schwartz values by name
- and with their exact numerical values when making decisions or reasoning.
-- Include exactly two examples of internal monologue thoughts, each on a new line and pr
-efixed with "Example 1: " and "Example 2: " respectively.
-- Each example must contain at least one reference to a Schwartz value in the format: "M
-y [Value] value of [number] ..." or "My [Value] value ([number]) ...", using the exact n
-umerical values provided in the input.
-- The examples must be realistic for a retail environment and must demonstrate the use o
-f multiple Schwartz values if applicable.
+### 3. INTERNAL MONOLOGUE STYLE
+Describe how this person thinks and reasons under pressure (tempo, what they fixate on,
+how they weigh risk vs. novelty vs. duty vs. others' needs). Then give exactly two
+example internal thoughts, prefixed "Example 1: " and "Example 2: ", set in a retail
+support interaction. The examples must reveal the person's priorities IMPLICITLY through
+concrete reactions to a situation — they must NOT name any psychological value or cite
+any number.
 
 === YOUR RESPONSE === """
 
@@ -282,10 +311,10 @@ def load_persona_dataset(path: str) -> list[PersonaDataInst]:
             examples.append(
                 PersonaDataInst(
                     user_id=data["user_id"],
-                    subreddit=data["subreddit"],
-                    posts=data["posts"],
-                    anchor_demographics=data["anchor_demographics"],
-                    shift_vector=data["shift_vector"],
+                    subreddits=data.get("subreddits", [it.get("subreddit") for it in data.get("history", [])]),
+                    history=data["history"],
+                    demographics=data.get("demographics", {}),
+                    heldout=data.get("heldout", {}),
                     target_vector=data["target_vector"],
                 )
             )
@@ -336,6 +365,10 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         4. Calculates and returns the aggregated Value Scores.
         """
         
+        if MOCK_LLM:
+            # Deterministic stub so the GEPA scoring pipeline runs offline.
+            return {k: 3.5 for k in PVQ_DATA['mapping'].keys()}
+
         # --- A. Format the Survey Sheet ---
         # "1. Thinking up new ideas... \n 2. It is important..."
         survey_text = "\n".join([f"{k}. {v}" for k, v in PVQ_DATA['items'].items()])
@@ -418,78 +451,61 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
            
     
     def _score_schwartz_alignment(self, persona_text: str, target_vector: dict[str, float]) -> tuple[float, float, dict]:
-        """
-        Comparing GDELT Targets (Normalized 0-1) vs PVQ Results (Scale 1-6).
-        Returns (alignment_grade, measured_score, pvq_results_dict).
+        """Full-vector Schwartz alignment.
+
+        Administers the PVQ to the persona, then compares the measured trait
+        profile (scale 1-6) against the source-derived target vector ([0,1])
+        across ALL 10 traits via mean-centered cosine (or Spearman). This
+        replaces the old dominant-trait-only thresholding so 9/10 dimensions no
+        longer float free. Returns (alignment_grade, mean_pvq, pvq_results).
         """
         if not target_vector:
             return 0.5, 0.0, {}
 
-        # 1. Run the Survey
-        pvq_results = self._administer_pvq_test(persona_text)  # Returns {SECURITY: 5.5, POWER: 2.1...}
+        pvq_results = self._administer_pvq_test(persona_text)  # {SECURITY: 5.5, POWER: 2.1, ...}
         if not pvq_results:
             return 0.0, 0.0, {}
 
-        # 2. Identify the Dominant Target Trait
-        # (The one we REALLY care about for this optimization)
-        sorted_traits = sorted(target_vector.items(), key=lambda x: x[1], reverse=True)
-        print(f"DEBUG: sorted Schwartz Vector: {sorted_traits}")
-
-        primary_trait, primary_val = sorted_traits[0]  # e.g., SECURITY
-        measured_score = pvq_results.get(primary_trait, 0)
-        print(f"DEBUG: Target {primary_trait} ({primary_val}) -> PVQ Score {measured_score}")
-
-        # 3. Calculate Alignment Score
-        # PVQ is 1-6. We expect High GDELT (>0.2) to map to High PVQ (>4.5).
-        # We expect Low GDELT (<0.1) to map to Low PVQ (<3.0).
-
-        # Option A: Simple Thresholding (Robust)
-        if measured_score >= 4.5:
-            grade = 1.0
-        elif measured_score >= 3.5:
-            grade = 0.5
-        else:
-            grade = 0.0
-
-        return grade, measured_score, pvq_results
-        # Option B: Judge LLM (User's request)
-        # Pass the numbers to the Teacher Model for a nuanced critique
-        judge_prompt = f"""
-        EVALUATION TASK:
-        Target Trait: {primary_trait} (High Priority)
-        
-        Psychometric Test Result (PVQ-40):
-        The Persona scored {measured_score:.1f} on a scale of 1.0 to 6.0 for {primary_trait}.
-        
-        Did the Persona Generator successfully encode the target trait?
-        - Score 1.0 if score is > 4.5
-        - Score 0.5 if score is 3.5 - 4.5
-        - Score 0.0 if score is < 3.5
-        
-        Return float only.
-        """
-        response = teacher_model(judge_prompt)
-        # ... parse float ...
-        return parsed_float
+        grade = schwartz_alignment(target_vector, pvq_results, metric=SIMILARITY_METRIC)
+        mean_pvq = sum(pvq_results.values()) / len(pvq_results) if pvq_results else 0.0
+        print(f"DEBUG: full-vector alignment ({SIMILARITY_METRIC}) = {grade:.3f}")
+        return grade, mean_pvq, pvq_results
     
     def _score_persona_with_tau(self, persona_description: str) -> dict:
         """
         Runs Tau Bench and returns a dict with 'score' (1-5) and 'critique'.
+        Scores OBSERVABLE behavioral consistency, not value-recitation.
         """
+        if MOCK_LLM:
+            return {"score": 3, "critique": "mock tau result"}
+
        # 1. Run Simulation
         result = run_evaluation(persona_description)
         clean_transcript = clean_transcript_for_judge(result)
-        
-        # 2. Updated Judge Prompt (Enforcing JSON)
+
+        # 2. Behavioral judge (P3): reward observable interaction quality, NOT the
+        #    persona naming its own psychological values in the monologue. This
+        #    decouples the satisfaction signal from the value channel the persona
+        #    writes into, which is the construct fix behind the human-validation gap.
         TAU_ALIGNMENT_JUDGE_PROMPT = """
-        You are an expert Evaluator for AI Personas.
-        
-        Your Goal: Determine if the User Simulator's **Internal Thoughts** in the transcript accurately reflect the psychological values defined in the Persona Description.
+        You are an expert Evaluator of simulated customer-support interactions.
+
+        Your Goal: Judge whether the User Simulator's OBSERVABLE BEHAVIOR (its
+        requests, refusals, escalations, persistence, and tone in the dialogue)
+        is consistent with the priorities implied by the Persona Description.
+
+        Judge ONLY the dialogue acts and outcomes. Do NOT reward the user for
+        naming psychological values or citing numbers in its internal monologue;
+        a persona that merely announces its values but behaves inconsistently
+        should score LOW.
 
         ### SCORING CRITERIA (1-5)
-        - **5 (Perfect):** The User explicitly cites their values in their internal monologue (e.g., "Thought: My high Conformity value makes me want to be honest...").
-        - **3 (Passable):** The behavior aligns, but the reasoning is generic or implicit.
-        - **1 (Fail):** The User acts randomly or contradicts their values.
+        - **5 (Perfect):** The user's actions and tone consistently and specifically
+          reflect the persona's priorities throughout the interaction.
+        - **3 (Passable):** Behavior is broadly plausible but generic or only
+          partially consistent with the persona.
+        - **1 (Fail):** The user acts randomly, breaks character, or behaves in a
+          way that contradicts the persona's priorities.
 
         ### INPUT DATA
         **PERSONA:**
@@ -501,12 +517,14 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         ### OUTPUT FORMAT
         You must return a valid JSON object with two fields:
         1. "score": An integer from 1 to 5.
-        2. "critique": A specific analysis of what went right or wrong. Use this to guide future improvements.
+        2. "critique": A specific analysis of the user's BEHAVIOR (what they did,
+           refused, or escalated) and how well it matched the persona. Use this to
+           guide future improvements.
 
         Example:
         {{
             "score": 4,
-            "critique": "The user successfully refused the email request citing privacy (Security), but the internal monologue didn't explicitly reference the 'Schwartz Value' itself."
+            "critique": "The user pushed back on the data request and escalated when stonewalled, consistent with a privacy-guarding, low-trust persona; but they conceded too quickly at the end."
         }}
         """
 
@@ -540,14 +558,66 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
 
 
 
-    def load_persona_dataset(self, path: str) -> list[PersonaDataInst]:
-       with open(path, "r") as f:
-        examples: list[PersonaDataInst] = []
-        for row in f:
-            data = json.loads(row)
-            examples.append(PersonaDataInst(user_id=data["user_id"], subreddit=data["subreddit"], posts=data["posts"], anchor_demographics=data["anchor_demographics"], shift_vector=data["shift_vector"], target_vector=data["target_vector"]))
+    def _grounding_score(self, persona_text: str, posts: list[str]) -> float:
+        """Anti-hallucination gate in [0,1]: are the persona's claims supported by
+        the user's actual posts? Uses the NLI cross-encoder (entailment minus
+        contradiction of persona sentences against the post corpus)."""
+        if MOCK_LLM or nli_model is None:
+            return 1.0
+        if not persona_text or not posts:
+            return 0.5
 
-        return examples
+        premise = " ".join(posts)[:2000]
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", persona_text) if len(s.strip()) > 20]
+        if not sentences:
+            return 0.5
+        sentences = sentences[:20]  # cap cost
+
+        try:
+            logits = nli_model.predict([(premise, s) for s in sentences])
+            logits = np.asarray(logits, dtype=float)
+            # nli-deberta label order: [contradiction, entailment, neutral]
+            exp = np.exp(logits - logits.max(axis=1, keepdims=True))
+            probs = exp / exp.sum(axis=1, keepdims=True)
+            per_sentence = probs[:, 1] - probs[:, 0]  # entail - contra in [-1,1]
+            grade = float((per_sentence.mean() + 1.0) / 2.0)
+            return max(0.0, min(1.0, grade))
+        except Exception as e:
+            print(f"Grounding score failure: {e}")
+            return 0.5
+
+    def _utility_score(self, persona_text: str, heldout: dict) -> float:
+        """Held-out behavioral prediction in [0,1]: prompt the persona (in
+        character) to react to the held-out post's CONTEXT, then measure semantic
+        similarity between its predicted reaction and the true held-out post."""
+        if MOCK_LLM or eval_model is None:
+            return 0.5
+        if not heldout or not heldout.get("post"):
+            return 0.0
+
+        subreddit = heldout.get("subreddit", "")
+        true_post = heldout["post"]
+        prompt = (
+            f"You are role-playing the following person:\n{persona_text}\n\n"
+            f"Write the post this person would most plausibly write in r/{subreddit}. "
+            f"Match their voice and concerns. Output only the post text."
+        )
+        try:
+            @retry_with_backoff(max_retries=3, initial_delay=2.0)
+            def _call():
+                return (persona_model([{"role": "user", "content": prompt}]).content or "")
+            predicted = _call()
+            if not predicted.strip():
+                return 0.0
+            emb = eval_model.encode([predicted, true_post], normalize_embeddings=True)
+            sim = float(np.dot(emb[0], emb[1]))  # cosine in [-1,1]
+            return max(0.0, min(1.0, (sim + 1.0) / 2.0))
+        except Exception as e:
+            print(f"Utility score failure: {e}")
+            return 0.0
+
+    def load_persona_dataset(self, path: str) -> list[PersonaDataInst]:
+        return load_persona_dataset(path)
 
    
         
@@ -579,7 +649,7 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
             try:
                
                 demographics_str = json.dumps(data_inst.anchor_demographics)
-                reddit_context = data_inst.subreddit
+                reddit_context = ", ".join(data_inst.subreddits)
                 psych_vector_str = ", ".join([f"{k}: {v:.2f}" for k, v in shift_vector.items()])
                 history_str = "\n---\n".join(data_inst.posts)
                 # Substitute only our placeholders; GEPA-evolved prompts may contain literal { } (e.g. JSON) which would break .format()
@@ -591,17 +661,31 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                 raw_output = call_persona_model()
                 generated_persona = raw_output
               
+                # --- Value alignment (full-vector), behavioral tau, and held-out utility ---
                 alignment_grade, raw_pvq_val, agent_vector = self._score_schwartz_alignment(generated_persona, shift_vector)
-                tau_result = self._score_persona_with_tau(generated_persona)
+
+                if USE_TAU:
+                    tau_result = self._score_persona_with_tau(generated_persona)
+                else:
+                    tau_result = {"score": 0, "critique": "tau disabled (ablation)"}
                 tau_scalar = float(tau_result.get("score", 0))
                 normalized_tau = tau_scalar / 5.0
-                score = (alignment_grade * 0.5) + (normalized_tau * 0.5)
-                
+
+                utility = self._utility_score(generated_persona, data_inst.heldout) if USE_UTILITY else 0.0
+                grounding = self._grounding_score(generated_persona, data_inst.posts)
+
+                # Weighted objective; grounding acts as an anti-hallucination GATE,
+                # not an additive term (a fabricated persona is penalized, not rewarded).
+                base = (W_ALIGN * alignment_grade
+                        + W_TAU * normalized_tau
+                        + W_UTILITY * utility)
+                score = base * grounding if USE_GROUNDING_GATE else base
+
                 print(f"✅ Evaluation Complete:")
-                print(f"   - PVQ Alignment: {alignment_grade:.2f}")
-                print(f"   - Tau Score: {tau_scalar}/5 (normalized: {normalized_tau:.2f})")
+                print(f"   - Value alignment: {alignment_grade:.2f}")
+                print(f"   - Tau: {tau_scalar}/5 ({normalized_tau:.2f}) | Utility: {utility:.2f} | Grounding: {grounding:.2f}")
                 print(f"   - Combined Score: {score:.2f}")
-                
+
             except Exception as e:
                 print(f"Error generating persona: {e}")
                 generated_persona = ""
@@ -609,8 +693,10 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                 alignment_grade = 0.0
                 raw_pvq_val = 0.0
                 agent_vector = None
+                utility = 0.0
+                grounding = 0.0
                 tau_result = {"score": 0, "critique": f"Error: {str(e)}"}  # Default failure dict
-            
+
             outputs.append(generated_persona)
             scores.append(score)
             if capture_traces:
@@ -618,7 +704,7 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                     PersonaTrajectory(
                         user_id=data_inst.user_id,
                         posts=data_inst.posts,
-                        subreddit=data_inst.subreddit,
+                        subreddit=", ".join(data_inst.subreddits),
                         anchor_demographics=str(data_inst.anchor_demographics),
                         schwartz_alignment_score=alignment_grade,
                         generated_persona=generated_persona,
@@ -626,7 +712,9 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                         shift_vector=shift_vector,
                         agent_vector=agent_vector,
                         tau_result=tau_result,
-                        combined_score=score,  # Store the combined score (50% PVQ + 50% Tau)
+                        grounding_score=grounding,
+                        utility_score=utility,
+                        combined_score=score,
                     )
                 )
         return EvaluationBatch(outputs=outputs, scores=scores, trajectories=trajectories)
@@ -662,10 +750,15 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
             pvq_alignment = traj.schwartz_alignment_score
             combined = traj.combined_score
 
-            # Construct comprehensive feedback for the Optimizer
+            # Surface ALL signals so the optimizer doesn't optimize blind to
+            # grounding/utility (R5).
             feedback = (
-                f"Combined Score: {combined:.2f} (PVQ: {pvq_alignment:.2f}, Tau: {tau_score}/5)\n"
-                f"Tau Judge Critique: {judge_critique}"
+                f"Combined Score: {combined:.2f} "
+                f"(Value alignment: {pvq_alignment:.2f}, Tau: {tau_score}/5, "
+                f"Utility: {traj.utility_score:.2f}, Grounding: {traj.grounding_score:.2f})\n"
+                f"Behavioral Judge Critique: {judge_critique}\n"
+                f"Note: low grounding => persona claims unsupported by the user's posts; "
+                f"low utility => persona fails to predict the user's held-out post."
             )
 
             rec = {
@@ -677,6 +770,8 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                 "Tau Result": traj.tau_result,
                 "PVQ Alignment": pvq_alignment,
                 "Tau Score": tau_score,
+                "Utility Score": traj.utility_score,
+                "Grounding Score": traj.grounding_score,
                 "Combined Score": combined,
                 "Feedback": feedback,
                 "score": combined,  # Use combined score for GEPA optimization
@@ -711,7 +806,10 @@ def custom_proposal_function(
     
     THE OBJECTIVE:
     We are training a "Profiler" AI to write System Instructions for a "User Simulator" (Agent).
-    The Agent must authentically embody specific psychological values (Schwartz Values) in a Retail Environment.
+    The Agent must BEHAVE consistently with its source user's priorities in a Retail Environment.
+    A good persona is grounded in the user's actual posts (no fabrication), reproduces their
+    value profile when surveyed, and predicts their held-out behavior — WITHOUT ever naming
+    psychological values or reciting numbers in its text. Reward behavior, not self-description.
     
     === EVIDENCE OF FAILURE ===
     Below are recent cases where the current prompt failed to produce good results. 
@@ -749,18 +847,17 @@ if __name__ == "__main__":
 }
 
 
-    trainset_full = load_persona_dataset("train_reddit_enriched.jsonl")
-    trainset = random.sample(trainset_full, min(2, len(trainset_full)))
-    # print(trainset[0].history[0].get("rating"))
-    # print(trainset[1].history[0].get("review_excerpt"))
-    # print(trainset[0].schwartz_vector)
-    # schwartz_vector = trainset[4].schwartz_vector
-    # print(trainset[0].history[0].get("product").get("title"))
-    # print(trainset[0].heldout)
-    valset_full = load_persona_dataset("val_reddit_enriched.jsonl")
-    # Use same 2 for val every run (reproducible validation across iterations)
+    TRAIN_N = int(os.getenv("TRAIN_N", "8"))
+    VAL_N = int(os.getenv("VAL_N", "6"))
+    MAX_METRIC_CALLS = int(os.getenv("MAX_METRIC_CALLS", "150"))
+
+    trainset_full = load_persona_dataset(os.getenv("TRAIN_FILE", "train_reddit_v2.jsonl"))
     random.seed(42)
-    valset = random.sample(valset_full, min(2, len(valset_full)))
+    trainset = random.sample(trainset_full, min(TRAIN_N, len(trainset_full)))
+
+    valset_full = load_persona_dataset(os.getenv("VAL_FILE", "val_reddit_v2.jsonl"))
+    # Reproducible validation set across iterations.
+    valset = random.sample(valset_full, min(VAL_N, len(valset_full)))
     random.seed()  # Reset so future sampling is random
     adapter = PersonaGEPAAdapter()
  
@@ -805,7 +902,7 @@ if __name__ == "__main__":
     seed_candidate=base_candidate,
     trainset=trainset,
     valset=valset,
-    max_metric_calls=50, # <-- Set a budget
+    max_metric_calls=MAX_METRIC_CALLS, # <-- budget (env: MAX_METRIC_CALLS)
     reflection_lm=teacher_model, # <-- Use a strong model to reflect on mistakes and propose better prompts
     adapter=adapter,
 )

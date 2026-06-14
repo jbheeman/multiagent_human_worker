@@ -1,3 +1,9 @@
+# NOTE (AAAI rework): the scale loop in this file's __main__ (paragraph -> LLM YAML
+# compile with invented keys + k=3 conformance retries) is SUPERSEDED by
+# persona_pipeline_datadesigner.py, which uses a FIXED PersonaProfile schema (no
+# invented keys), deterministic YAML, and copies the Schwartz vector verbatim.
+# REDDIT_PROMPT below has been de-leaked to match personaAdapter; YAML_PROMPT and
+# CONFORMANCE_PROMPT are retained for reference only.
 from smolagents.models import OpenAIServerModel
 import os
 from typing import Any
@@ -130,29 +136,14 @@ You must output the persona in the following strict format:
 (A first-person introduction: "I am a [Age] year old [Job]...")
 
 ### 2. PSYCHOLOGICAL DRIVERS
-(A narrative explanation of *why* they act the way they do. Connect their background to their values.)
+(A narrative explanation of *why* they act the way they do. Connect their background and lived
+experience to their priorities — in plain language, never as named psychological values or numbers.)
 
-### 3. SCHWARTZ VALUES (JSON)
-(Provide the raw values in a valid JSON block for parsing)
-```json
-{{
-  "Security": 0.8,
-  "Conformity": 0.4,
-  ...
-}}
-
- 
-### 4. INTERNAL MONOLOGUE STYLE
-Describe how this person thinks. The description must:
-- State clearly that the internal monologue must explicitly name Schwartz values by name
- and with their exact numerical values when making decisions or reasoning.
-- Include exactly two examples of internal monologue thoughts, each on a new line and pr
-efixed with "Example 1: " and "Example 2: " respectively.
-- Each example must contain at least one reference to a Schwartz value in the format: "M
-y [Value] value of [number] ..." or "My [Value] value ([number]) ...", using the exact n
-umerical values provided in the input.
-- The examples must be realistic for the current context and must demonstrate the use o
-f multiple Schwartz values if applicable.
+### 3. INTERNAL MONOLOGUE STYLE
+Describe how this person thinks and reasons under pressure. Then give exactly two example internal
+thoughts, prefixed "Example 1: " and "Example 2: ", set in a support interaction. The examples must
+reveal the person's priorities IMPLICITLY through concrete reactions — they must NOT name any
+psychological value or cite any number.
 
 === YOUR RESPONSE ===
 """
