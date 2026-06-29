@@ -9,6 +9,10 @@ Usage:
   # Or with defaults: personas from src/tau2/user/eval_personas, copy to ../multiagent_human_worker/reddit/Eval
   python scripts/run_all_personas.py --models gpt-4o
 
+  # From persona pipeline JSONL (writes cached YAML under reddit/.personas_yaml_cache_*):
+  python scripts/run_all_personas.py --models gpt-4o \
+    --personas-jsonl ../reddit/personas_gepa_unopt.jsonl --eval-dir ../reddit/Eval/gepa_unopt
+
 Each run uses TAU2_PERSONA_FILE so the saved JSON includes persona_name/persona_file in user_info.
 Output is saved to data/simulations/<model>_<persona>.json then copied to <eval_dir>/<model>/<persona>_<model>.json.
 """
@@ -20,7 +24,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from dotenv import load_dotenv
 
+from persona_jsonl import materialize_personas_from_jsonl
+
+load_dotenv()
 
 def run_with_retry(cmd: list, env: dict, cwd: Path, max_retries: int = 9, initial_delay: float = 2.0, backoff_factor: float = 2.0) -> int:
     """Run command with exponential backoff on non-zero exit. Returns exit code (0 on success)."""
@@ -58,7 +66,32 @@ def main() -> None:
         "--personas-dir",
         type=Path,
         default=None,
-        help="Directory of persona YAML files. Default: tau2-bench src/tau2/user/eval_personas",
+        help="Directory of persona YAML files. Default: tau2-bench src/tau2/user/eval_personas.",
+    )
+    parser.add_argument(
+        "--personas-jsonl",
+        type=Path,
+        default=None,
+        help="JSONL with persona_yaml per row (from persona pipeline). Mutually exclusive with --personas-dir.",
+    )
+    parser.add_argument(
+        "--personas-limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Use only the first N rows from --personas-jsonl (e.g. 10 for a smoke test on a larger file).",
+    )
+    parser.add_argument(
+        "--personas-cache-dir",
+        type=Path,
+        default=None,
+        help="Where to write YAML extracted from --personas-jsonl (default: sibling .personas_yaml_cache_<stem>).",
+    )
+    parser.add_argument(
+        "--expected-personas",
+        type=int,
+        default=0,
+        help="Fail unless exactly this many personas are loaded (0 disables).",
     )
     parser.add_argument(
         "--eval-dir",
@@ -73,8 +106,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--user-llm",
-        default="openai/gemma3",
-        help="User simulator LLM (default: openai/gemma3).",
+        default="openai/gemma",
+        help="User simulator LLM (default: openai/gemma).",
     )
     parser.add_argument(
         "--num-trials",
@@ -119,14 +152,16 @@ def main() -> None:
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
-    if args.personas_dir is None:
+    if args.personas_dir and args.personas_jsonl:
+        print("Use only one of --personas-dir or --personas-jsonl.", file=sys.stderr)
+        sys.exit(1)
+    if args.personas_dir is None and args.personas_jsonl is None:
         args.personas_dir = repo_root / "src" / "tau2" / "user" / "eval_personas"
     if args.eval_dir is None:
         args.eval_dir = repo_root.parent / "multiagent_human_worker" / "reddit" / "Eval"
     if args.simulations_dir is None:
         args.simulations_dir = repo_root / "data" / "simulations"
 
-    args.personas_dir = args.personas_dir.resolve()
     if str(args.eval_dir).strip() in ("", "="):
         print(
             "Invalid --eval-dir (did you use spaces? Use: --eval-dir /path or --eval-dir=/path)",
@@ -140,13 +175,40 @@ def main() -> None:
         print(f"Eval dir is not a directory: {args.eval_dir}", file=sys.stderr)
         sys.exit(1)
 
-    if not args.personas_dir.is_dir():
-        print(f"Personas dir not found: {args.personas_dir}", file=sys.stderr)
-        sys.exit(1)
+    if args.personas_jsonl:
+        args.personas_jsonl = args.personas_jsonl.resolve()
+        if not args.personas_jsonl.is_file():
+            print(f"Personas JSONL not found: {args.personas_jsonl}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            persona_files = materialize_personas_from_jsonl(
+                args.personas_jsonl,
+                cache_dir=args.personas_cache_dir,
+                limit=args.personas_limit,
+            )
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            sys.exit(1)
+        cache_dir = persona_files[0].parent
+        print(
+            f"Loaded {len(persona_files)} persona(s) from {args.personas_jsonl} "
+            f"(cache: {cache_dir})"
+        )
+    else:
+        args.personas_dir = args.personas_dir.resolve()
+        if not args.personas_dir.is_dir():
+            print(f"Personas dir not found: {args.personas_dir}", file=sys.stderr)
+            sys.exit(1)
+        persona_files = sorted(args.personas_dir.glob("*.yaml"))
+        if not persona_files:
+            print(f"No .yaml files in {args.personas_dir}", file=sys.stderr)
+            sys.exit(1)
 
-    persona_files = sorted(args.personas_dir.glob("*.yaml"))
-    if not persona_files:
-        print(f"No .yaml files in {args.personas_dir}", file=sys.stderr)
+    if args.expected_personas > 0 and len(persona_files) != args.expected_personas:
+        print(
+            f"Expected {args.expected_personas} personas, found {len(persona_files)}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     base_cmd = [

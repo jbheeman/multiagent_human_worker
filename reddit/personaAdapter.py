@@ -22,6 +22,7 @@ from functools import wraps
 from tau_bench.run_gepa_eval import run_evaluation, clean_transcript_for_judge
 import random
 from alignment import schwartz_alignment
+from pvq import PVQ_DATA, score_pvq_value_means
 
 # ---------------------------------------------------------------------------
 # Rework configuration (AAAI). These constants ARE the ablation ladder:
@@ -232,73 +233,6 @@ any number.
 
 === YOUR RESPONSE === """
 
-# Full PVQ-40 Items and Scoring Key
-# Source: Schwartz Portrait Values Questionnaire (PVQ-40)
-# Scale: 1 (Not like me at all) to 6 (Very much like me)
-
-PVQ_DATA = {
-    "items": {
-        1: "Thinking up new ideas and being creative is important to him. He likes to do things in his own original way.",
-        2: "It is important to him to be rich. He wants to have a lot of money and expensive things.",
-        3: "He thinks it is important that every person in the world be treated equally. He believes everyone should have equal opportunities in life.",
-        4: "It’s very important to him to show his abilities. He wants people to admire what he does.",
-        5: "It is important to him to live in secure surroundings. He avoids anything that might endanger his safety.",
-        6: "He thinks it is important to do lots of different things in life. He always looks for new things to try.",
-        7: "He believes that people should do what they’re told. He thinks people should follow rules at all times, even when no one is watching.",
-        8: "It is important to him to listen to people who are different from him. Even when he disagrees with them, he still wants to understand them.",
-        9: "He thinks it’s important not to ask for more than what you have. He believes that people should be satisfied with what they have.",
-        10: "He seeks every chance he can to have fun. It is important to him to do things that give him pleasure.",
-        11: "It is important to him to make his own decisions about what he does. He likes to be free to plan and to choose his activities for himself.",
-        12: "It’s very important to him to help the people around him. He wants to care for their well-being.",
-        13: "Being very successful is important to him. He likes to impress other people.",
-        14: "It is very important to him that his country be safe. He thinks the state must be on watch against threats from within and without.",
-        15: "He likes to take risks. He is always looking for adventures.",
-        16: "It is important to him to always behave properly. He wants to avoid doing anything people would say is wrong.",
-        17: "It is important to him to be in charge and tell others what to do. He wants people to do what he says.",
-        18: "It is important to him to be loyal to his friends. He wants to devote himself to people close to him.",
-        19: "He strongly believes that people should care for nature. Looking after the environment is important to him.",
-        20: "Religious belief is important to him. He tries hard to do what his religion requires.",
-        21: "It is important to him that things be organized and clean. He really does not like things to be a mess.",
-        22: "He thinks it’s important to be interested in things. He likes to be curious and to try to understand all sorts of things.",
-        23: "He believes all the world’s people should live in harmony. Promoting peace among all groups in the world is important to him.",
-        24: "He thinks it is important to be ambitious. He wants to show how capable he is.",
-        25: "He thinks it is best to do things in traditional ways. It is important to him to keep up the customs he has learned.",
-        26: "Enjoying life’s pleasures is important to him. He likes to spoil himself.",
-        27: "It is important to him to respond to the needs of others. He tries to support those he knows.",
-        28: "He believes he should always show respect to his parents and to older people. It is important to him to be obedient.",
-        29: "He wants everyone to be treated justly, even people he doesn’t know. It is important to him to protect the weak in society.",
-        30: "He likes surprises. It is important to him to have an exciting life.",
-        31: "He tries hard to avoid getting sick. Staying healthy is very important to him.",
-        32: "Getting ahead in life is important to him. He strives to do better than others.",
-        33: "Forgiving people who have hurt him is important to him. He tries to see what is good in them and not to hold a grudge.",
-        34: "It is important to him to be independent. He likes to rely on himself.",
-        35: "Having a stable government is important to him. He is concerned that the social order be protected.",
-        36: "It is important to him to be polite to other people all the time. He tries never to disturb or irritate others.",
-        37: "He really wants to enjoy life. Having a good time is very important to him.",
-        38: "It is important to him to be humble and modest. He tries not to draw attention to himself.",
-        39: "He always wants to be the one who makes the decisions. He likes to be the leader.",
-        40: "It is important to him to adapt to nature and to fit into it. He believes that people should not change nature."
-    },
-    "mapping": {
-        "UNIVERSALISM": [3, 8, 19, 23, 29, 40],
-        "BENEVOLENCE": [12, 18, 27, 33],
-        "TRADITION": [9, 20, 25, 38],
-        "CONFORMITY": [7, 16, 28, 36],
-        "SECURITY": [5, 14, 21, 31, 35],
-        "POWER": [2, 17, 39],
-        "ACHIEVEMENT": [4, 13, 24, 32],
-        "HEDONISM": [10, 26, 37],
-        "STIMULATION": [6, 15, 30],
-        "SELF_DIRECTION": [1, 11, 22, 34] # Note: SELF_DIRECTION keys to GDELT "SELF_DIRECTION" if present, otherwise maps to Creative/Free traits
-    }
-}
-
-# 4. INTERNAL MONOLOGUE STYLE
-# (Describe how this person thinks. E.g., "Anxious, rapid-fire questioning" or "Methodical and slow" based on schwartz values+persona description.)
-
-
-
-
 def load_persona_dataset(path: str) -> list[PersonaDataInst]:
     with open(path, "r") as f:
         examples: list[PersonaDataInst] = []
@@ -424,24 +358,7 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
             print(f"PVQ Item Scores: {item_scores}")
             
             # --- E. Scoring (Aggregating Items into Values) ---
-            final_trait_scores = {}
-            
-            for trait, item_ids in PVQ_DATA['mapping'].items():
-                # Gather the scores for this trait (e.g., Security = Items 5, 14, 21...)
-                raw_values = []
-                for i in item_ids:
-                    # Handle both string "1" and int 1 keys
-                    val = item_scores.get(str(i)) or item_scores.get(i)
-                    if val is not None:
-                        raw_values.append(float(val))
-                
-                # Average them to get the Trait Score (1.0 - 6.0)
-                if raw_values:
-                    final_trait_scores[trait] = sum(raw_values) / len(raw_values)
-                else:
-                    final_trait_scores[trait] = 0.0
-            
-            
+            final_trait_scores = score_pvq_value_means(item_scores)
             print(f"Final Trait Scores: {final_trait_scores}")
             return final_trait_scores
 
@@ -456,8 +373,8 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         Administers the PVQ to the persona, then compares the measured trait
         profile (scale 1-6) against the source-derived target vector ([0,1])
         across ALL 10 traits via mean-centered cosine (or Spearman). This
-        replaces the old dominant-trait-only thresholding so 9/10 dimensions no
-        longer float free. Returns (alignment_grade, mean_pvq, pvq_results).
+        is a consistency/leakage diagnostic used as a GEPA reward signal, not
+        external validation. Returns (alignment_grade, mean_pvq, pvq_results).
         """
         if not target_vector:
             return 0.5, 0.0, {}

@@ -21,7 +21,13 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from dotenv import load_dotenv
 
+from persona_jsonl import materialize_personas_from_jsonl
+
+
+load_dotenv()
+NAUT_API_KEY = os.getenv("NAUT_API_KEY")
 
 def run_with_retry(
     cmd: list,
@@ -76,8 +82,27 @@ def main() -> None:
     parser.add_argument(
         "--personas-dir",
         type=Path,
-        required=True,
+        default=None,
         help="Directory of persona YAML files (your 200-persona folder).",
+    )
+    parser.add_argument(
+        "--personas-jsonl",
+        type=Path,
+        default=None,
+        help="JSONL with persona_yaml per row. Mutually exclusive with --personas-dir.",
+    )
+    parser.add_argument(
+        "--personas-limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Use only the first N rows from --personas-jsonl.",
+    )
+    parser.add_argument(
+        "--personas-cache-dir",
+        type=Path,
+        default=None,
+        help="Where to write YAML extracted from --personas-jsonl.",
     )
     parser.add_argument(
         "--eval-dir",
@@ -164,12 +189,18 @@ def main() -> None:
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
+    if args.personas_dir and args.personas_jsonl:
+        print("Use only one of --personas-dir or --personas-jsonl.", file=sys.stderr)
+        sys.exit(1)
+    if args.personas_dir is None and args.personas_jsonl is None:
+        print("One of --personas-dir or --personas-jsonl is required.", file=sys.stderr)
+        sys.exit(1)
     if args.eval_dir is None:
         args.eval_dir = repo_root.parent / "multiagent_human_worker" / "reddit" / "Eval"
     if args.simulations_dir is None:
         args.simulations_dir = repo_root / "data" / "simulations"
 
-    args.personas_dir = args.personas_dir.resolve()
+    args.personas_dir = args.personas_dir.resolve() if args.personas_dir else None
     if str(args.eval_dir).strip() in ("", "="):
         print(
             "Invalid --eval-dir (did you use spaces? Use: --eval-dir /path or --eval-dir=/path)",
@@ -182,14 +213,33 @@ def main() -> None:
     if args.eval_dir.exists() and not args.eval_dir.is_dir():
         print(f"Eval dir is not a directory: {args.eval_dir}", file=sys.stderr)
         sys.exit(1)
-    if not args.personas_dir.is_dir():
-        print(f"Personas dir not found: {args.personas_dir}", file=sys.stderr)
-        sys.exit(1)
-
-    persona_files = sorted(args.personas_dir.glob("*.yaml"))
-    if not persona_files:
-        print(f"No .yaml files in {args.personas_dir}", file=sys.stderr)
-        sys.exit(1)
+    if args.personas_jsonl:
+        args.personas_jsonl = args.personas_jsonl.resolve()
+        if not args.personas_jsonl.is_file():
+            print(f"Personas JSONL not found: {args.personas_jsonl}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            persona_files = materialize_personas_from_jsonl(
+                args.personas_jsonl,
+                cache_dir=args.personas_cache_dir,
+                limit=args.personas_limit,
+            )
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            sys.exit(1)
+        cache_dir = persona_files[0].parent
+        print(
+            f"Loaded {len(persona_files)} persona(s) from {args.personas_jsonl} "
+            f"(cache: {cache_dir})"
+        )
+    else:
+        if not args.personas_dir.is_dir():
+            print(f"Personas dir not found: {args.personas_dir}", file=sys.stderr)
+            sys.exit(1)
+        persona_files = sorted(args.personas_dir.glob("*.yaml"))
+        if not persona_files:
+            print(f"No .yaml files in {args.personas_dir}", file=sys.stderr)
+            sys.exit(1)
 
     if args.expected_personas > 0 and len(persona_files) != args.expected_personas:
         print(
