@@ -29,6 +29,32 @@ def _load_rows(path: str) -> list[dict]:
     return rows
 
 
+def _load_ids(path: str) -> set[str]:
+    ids = set()
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            uid = row.get("user_id")
+            if uid:
+                ids.add(uid)
+    return ids
+
+
+def _dedupe_rows(rows: list[dict]) -> list[dict]:
+    seen = set()
+    deduped = []
+    for row in rows:
+        uid = row.get("user_id")
+        if not uid or uid in seen:
+            continue
+        deduped.append(row)
+        seen.add(uid)
+    return deduped
+
+
 def _matrix(rows: list[dict]) -> np.ndarray:
     return np.array(
         [[float(row["target_vector"][key]) for key in SCHWARTZ_KEYS] for row in rows],
@@ -134,6 +160,54 @@ def select_medoids(rows: list[dict], k: int, seed: int = 42) -> list[dict]:
     return selected
 
 
+def select_with_constraints(
+    rows: list[dict],
+    k: int,
+    seed: int = 42,
+    *,
+    include_rows: list[dict] | None = None,
+    exclude_ids: set[str] | None = None,
+) -> list[dict]:
+    """Select k rows while forcing includes and removing excluded user IDs."""
+    include_rows = _dedupe_rows(include_rows or [])
+    exclude_ids = set(exclude_ids or set())
+
+    forced = []
+    forced_ids = set()
+    for row in include_rows:
+        uid = row.get("user_id")
+        if not uid:
+            continue
+        if uid in exclude_ids:
+            raise ValueError(f"include user_id {uid!r} is also excluded")
+        if uid not in forced_ids:
+            forced.append(dict(row))
+            forced_ids.add(uid)
+
+    if len(forced) > k:
+        raise ValueError(f"{len(forced)} included rows exceeds k={k}")
+
+    remaining_k = k - len(forced)
+    candidate_rows = [
+        row for row in _dedupe_rows(rows)
+        if row.get("user_id") not in exclude_ids
+        and row.get("user_id") not in forced_ids
+    ]
+
+    if len(candidate_rows) < remaining_k:
+        raise ValueError(
+            f"cannot fill k={k}: need {remaining_k} candidates after "
+            f"{len(forced)} includes, but only {len(candidate_rows)} remain"
+        )
+
+    selected = forced
+    if remaining_k:
+        fill = select_medoids(candidate_rows, k=remaining_k, seed=seed)
+        selected.extend(fill)
+
+    return selected
+
+
 def write_jsonl(rows: list[dict], path: str) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -151,6 +225,18 @@ def main() -> None:
     parser.add_argument("--k", type=int, required=True, help="number of medoids to select")
     parser.add_argument("--seed", type=int, default=42, help="KMeans initialization seed")
     parser.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        help="JSONL rows to force into output first; repeatable",
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="JSONL rows whose user_id values must be excluded; repeatable",
+    )
+    parser.add_argument(
         "--out",
         default=None,
         help="output JSONL path (default: selected_users_pvq_k<K>.jsonl)",
@@ -158,7 +244,20 @@ def main() -> None:
     args = parser.parse_args()
 
     rows = _load_rows(args.input)
-    selected = select_medoids(rows, k=args.k, seed=args.seed)
+    include_rows = []
+    for path in args.include:
+        include_rows.extend(_load_rows(path))
+    exclude_ids = set()
+    for path in args.exclude:
+        exclude_ids.update(_load_ids(path))
+
+    selected = select_with_constraints(
+        rows,
+        k=args.k,
+        seed=args.seed,
+        include_rows=include_rows,
+        exclude_ids=exclude_ids,
+    )
     out = args.out or f"selected_users_pvq_k{args.k}.jsonl"
     write_jsonl(selected, out)
     print(f"wrote {out} ({len(selected)} rows from {len(rows)} eligible users)")

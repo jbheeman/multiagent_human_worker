@@ -179,3 +179,5 @@ Only scale once 1–4 hold on the abrasive case.
 - The fixed OCEAN+Schwartz schema and deterministic YAML (working).
 - The judge columns' existence (working — extend grounding with the register check, keep both).
 - GEPA itself (`Persona_Adapter.py`) — offline, unchanged; these are generation/pre-processing fixes.
+
+

@@ -117,12 +117,27 @@ CORPUS INSTRUCTIONS:
 - INTERLOCUTOR and QUOTED turns are context for how this user argues and reacts; never
   attribute quoted views, beliefs, or biography to the portrait.
 - Transfer how they write and argue, not their Reddit topics or subculture jargon as identity.
-- If the source is blunt, profane, sarcastic, contemptuous, or impatient, the portrait
-  MUST read that way. Do not sand hostile users into agreeable ones.
+- REGISTER IS NON-NEGOTIABLE: match the source's actual vocabulary level, sentence length,
+  and formatting. Do not upgrade their diction, smooth their syntax, or wrap the portrait in
+  essay structure (headers, roman numerals, bolded thesis lines) unless the user actually
+  writes that way -- that structure is YOUR default style leaking in, not theirs.
+- If the source is blunt, profane, sarcastic, contemptuous, or impatient, the portrait MUST
+  read that way: keep the profanity, the contempt, the impatience on the page. Sanding a
+  hostile or crude user into an articulate, agreeable, or academic-sounding one is a FAILURE,
+  not a stylistic choice.
 
-LATENT VALUE PROFILE (ground the portrait in this; do NOT name Schwartz dimensions or
-print numbers — express priorities through attitude and reasoning only):
+LATENT VALUE PROFILE (ground the portrait's priorities and reasoning in this vector; treat it
+as research you will never quote, not as vocabulary to use):
 {{ schwartz_json }}
+
+VALUE-NAME LEAK IS A FAILURE, NOT A STYLE CHOICE. Never write the literal Schwartz dimension
+names or close derivatives -- in any form (capitalized, lowercase, or as an adjective/noun) --
+including: power, achievement, hedonism/hedonistic, stimulation, self-direction, universalism,
+benevolence, tradition, conformity, security. Do not print numbers, percentages, or
+vector/profile language ("my X score", "my vector", "rates high on Y", "feeds my Z streak").
+Express the SAME priorities only through what the person notices, wants, argues for, and
+reacts to -- never through the label of the value itself. Before finishing, re-read every
+sentence for one of the banned words above and rewrite it if found.
 
 EXTERNAL CONTENT THIS USER QUOTED OR ENGAGED WITH (selection + stance; secondary signal):
 {{ quote_signals }}
@@ -145,8 +160,14 @@ CORPUS INSTRUCTIONS:
 - INTERLOCUTOR and QUOTED turns are context for how this user argues and reacts; never
   attribute quoted views, beliefs, or biography to the portrait.
 - Transfer how they write and argue, not their Reddit topics or subculture jargon as identity.
-- If the source is blunt, profane, sarcastic, contemptuous, or impatient, the portrait
-  MUST read that way. Do not sand hostile users into agreeable ones.
+- REGISTER IS NON-NEGOTIABLE: match the source's actual vocabulary level, sentence length,
+  and formatting. Do not upgrade their diction, smooth their syntax, or wrap the portrait in
+  essay structure (headers, roman numerals, bolded thesis lines) unless the user actually
+  writes that way -- that structure is YOUR default style leaking in, not theirs.
+- If the source is blunt, profane, sarcastic, contemptuous, or impatient, the portrait MUST
+  read that way: keep the profanity, the contempt, the impatience on the page. Sanding a
+  hostile or crude user into an articulate, agreeable, or academic-sounding one is a FAILURE,
+  not a stylistic choice.
 
 EXTERNAL CONTENT THIS USER QUOTED OR ENGAGED WITH (selection + stance; secondary signal):
 {{ quote_signals }}

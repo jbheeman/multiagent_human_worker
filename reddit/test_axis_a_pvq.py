@@ -95,6 +95,33 @@ def test_selector_outputs_required_sidecars():
         assert all(0.0 <= float(v) <= 1.0 for v in row["target_vector"].values())
 
 
+def test_selector_include_exclude_splits_are_disjoint():
+    rows = [_sample_enriched_row(f"u{i}", offset=i) for i in range(40)]
+    smoke = select_pvq_medoids.select_medoids(rows, k=5, seed=1)
+    eval_rows = select_pvq_medoids.select_with_constraints(
+        rows, k=12, seed=2, include_rows=smoke,
+    )
+    train_rows = select_pvq_medoids.select_with_constraints(
+        rows, k=10, seed=3, exclude_ids={r["user_id"] for r in eval_rows},
+    )
+    test_rows = select_pvq_medoids.select_with_constraints(
+        rows,
+        k=6,
+        seed=4,
+        exclude_ids={r["user_id"] for r in eval_rows + train_rows},
+    )
+
+    smoke_ids = {r["user_id"] for r in smoke}
+    eval_ids = {r["user_id"] for r in eval_rows}
+    train_ids = {r["user_id"] for r in train_rows}
+    test_ids = {r["user_id"] for r in test_rows}
+
+    assert smoke_ids <= eval_ids
+    assert eval_ids.isdisjoint(train_ids)
+    assert eval_ids.isdisjoint(test_ids)
+    assert train_ids.isdisjoint(test_ids)
+
+
 def test_generation_prompt_boundary():
     source = open(os.path.join(HERE, "persona_pipeline_datadesigner.py"), encoding="utf-8").read()
     assert "LATENT VALUE PROFILE" in source
@@ -112,6 +139,7 @@ def main():
     test_pvq_scoring()
     test_seed_schema_and_no_heldout_leakage()
     test_selector_outputs_required_sidecars()
+    test_selector_include_exclude_splits_are_disjoint()
     test_generation_prompt_boundary()
     print("ALL AXIS A PVQ TESTS PASSED")
 
