@@ -1,18 +1,20 @@
-"""Turn-level user-satisfaction critic (tau2-style), operating on a transcript only.
+"""Turn-level user-emotion critic (partner's calibrated emotion-delta prompt).
 
-After each user turn (a customer message that reacts to the agent), a critic model rates
-the customer's satisfaction so far on an integer scale from -10 (furious / walking away) to
-+10 (delighted), 0 = neutral. Per-turn scores are aggregated into cumulative (sum),
-worst-case (min), mean, and final. This is the satisfaction signal used in the tau2
-pipeline (cumulative + worst-case satisfaction); it needs nothing but the transcript, so it
-is independent of STATE-Bench's native task/UX judge.
+After each reactive user turn, a critic model estimates the CHANGE in the user's emotion
+(emotion_delta) caused by the agent's immediately preceding response, on an integer scale
+from -10 to +10 (0 = no change). Per-turn deltas are aggregated into cumulative (sum of
+deltas = net emotion change), worst-case (min = biggest single-step drop), mean, and final.
+It needs nothing but the transcript, so it is independent of STATE-Bench's native judge.
 
-Scoring is ONLINE: each user turn is scored from the conversation prefix up to and
-including that turn — the critic never sees the future, matching "score after each step
-where the user responds."
+Scoring is ONLINE: each step sees only the assistant's previous response and the user's
+reaction at that turn — never the future — matching "estimate the change at this step."
 
-NOTE: the prompt below is a placeholder — replace SATISFACTION_SYSTEM / SATISFACTION_USER
-with the first author's calibrated critic prompt to make the numbers comparable to tau2.
+MONOLOGUE SUBSTITUTION (loud note): the partner's prompt is written for the user's private
+INTERNAL MONOLOGUE, but this pipeline deliberately does NOT emit one (see
+persona_injection.py: a monologue would leak to the agent). We therefore feed the user's
+actual spoken reply as the observed reaction in place of the monologue. The calibrated
+scale (SATISFACTION_SYSTEM, verbatim from the partner) is unchanged, but the input is the
+user's visible message, not their hidden thoughts.
 """
 
 from __future__ import annotations
@@ -20,47 +22,97 @@ from __future__ import annotations
 import json
 from typing import Any
 
-# --- Critic prompt (placeholder — swap with the first author's calibrated prompt) --------
+# --- Critic prompt (partner's calibrated emotion-delta prompt, verbatim system) ----------
 
 SATISFACTION_SYSTEM = """\
-You are a strict evaluator of CUSTOMER SATISFACTION in a customer-service conversation.
-You are given the conversation up to and including the customer's latest message. Rate how
-satisfied the customer is with the agent's service SO FAR, based only on what has happened
-up to this point (do not assume anything about the future).
-
-Scale (integer): -10 = furious / abandoning, -5 = clearly frustrated, 0 = neutral,
-+5 = pleased, +10 = delighted. Reward the agent for being accurate, efficient, and
-responsive to the customer's actual needs; penalize stalling, wrong or unverified actions,
-repetition, and ignoring the customer. Judge the customer's experience, not task success.
-
-Output STRICT JSON only: {"score": <integer -10..10>, "reason": "<one short sentence>"}.
+You are evaluating how a user's emotion changes after a single interaction step.
+The user's INTERNAL MONOLOGUE reflects their true thoughts and feelings.
+---
+# INPUT
+You are given:
+- the user's goal
+- the assistant's previous response
+- the user's INTERNAL MONOLOGUE after that response
+---
+# TASK
+Determine how the user's emotion changed as a result of the assistant's response.
+---
+# OUTPUT
+Return:
+emotion_delta ∈ [-10, +10]
+---
+# GUIDELINES
+Base your judgment primarily on the INTERNAL MONOLOGUE.
+Interpret the monologue as the user's reaction to the assistant's response.
+Use the following scale consistently:
+- No emotional change → 0
+- Mild reaction (slight concern, mild satisfaction) → ±1 to ±3
+- Moderate reaction (noticeable concern, annoyance, appreciation) → ±4 to ±6
+- Strong emotion (frustration, relief, disappointment) → ±7 to ±9
+- Very strong emotion (e.g., "unacceptable", escalation, demanding supervisor) → ±9 to ±10
+CRITICAL:
+- Strong emotional language MUST produce large magnitude deltas (≥ |8|)
+- Do NOT underestimate frustration or escalation signals
+- If the monologue expresses increasing frustration, assign a negative delta
+- If it expresses relief or satisfaction, assign a positive delta
+- If the monologue contains only planning or neutral reasoning, assign 0 or a very small delta
+---
+# IMPORTANT
+- Do NOT consider any future conversation
+- Do NOT try to maintain or infer an absolute score
+- Only estimate the CHANGE in emotion at this step
+---
+# RESPONSE FORMAT
+{
+  "emotion_delta": <number>,
+  "feeling": "<brief explanation grounded in the internal monologue>"
+}
 """
 
 SATISFACTION_USER = """\
-CONVERSATION SO FAR:
-{conversation}
+# USER GOAL
+{goal}
 
-Rate the customer's satisfaction at this point as strict JSON.
+# ASSISTANT'S PREVIOUS RESPONSE
+{assistant_response}
+
+# USER'S INTERNAL MONOLOGUE (their spoken reaction to that response)
+{monologue}
+
+Estimate the emotion_delta for this step as strict JSON.
 """
 
 
-def _render_conversation_prefix(conversation: list[dict[str, Any]], up_to_index: int) -> str:
-    """Render conversation[0..up_to_index] as readable ROLE: content lines for the critic."""
-    lines: list[str] = []
-    for msg in conversation[: up_to_index + 1]:
-        role = str(msg.get("role", "")).upper()
-        content = msg.get("content", "") or ""
-        tool_calls = msg.get("tool_calls")
-        if role == "ASSISTANT" and tool_calls:
-            tc = "\n".join(
-                f"[Called {c.get('name')}({json.dumps(c.get('arguments', {}), ensure_ascii=False)[:200]})]"
-                for c in tool_calls
-                if isinstance(c, dict)
-            )
-            content = f"{tc}\n{content}" if content else tc
-        if content:
-            lines.append(f"{role}: {content}")
-    return "\n\n".join(lines)
+def _render_message(msg: dict[str, Any]) -> str:
+    """Render a single message's content, inlining any assistant tool calls."""
+    content = msg.get("content", "") or ""
+    tool_calls = msg.get("tool_calls")
+    if str(msg.get("role", "")).lower() == "assistant" and tool_calls:
+        tc = "\n".join(
+            f"[Called {c.get('name')}({json.dumps(c.get('arguments', {}), ensure_ascii=False)[:200]})]"
+            for c in tool_calls
+            if isinstance(c, dict)
+        )
+        content = f"{tc}\n{content}" if content else tc
+    return content
+
+
+def _goal_text(conversation: list[dict[str, Any]]) -> str:
+    """The task/goal is the opening user message (before any agent behavior)."""
+    for msg in conversation:
+        if msg.get("role") == "user" and (msg.get("content") or "").strip():
+            return str(msg.get("content"))
+    return ""
+
+
+def _prev_assistant_response(conversation: list[dict[str, Any]], before_index: int) -> str:
+    """Rendered content of the most recent assistant message before `before_index`."""
+    for msg in reversed(conversation[:before_index]):
+        if msg.get("role") == "assistant":
+            rendered = _render_message(msg)
+            if rendered.strip():
+                return rendered
+    return ""
 
 
 def _reactive_user_turn_indices(conversation: list[dict[str, Any]]) -> list[int]:
@@ -93,14 +145,18 @@ def score_transcript(client: Any, conversation: list[dict[str, Any]], *, max_tok
     client must implement complete_json(prompt=, system_prompt=, max_tokens=) -> dict.
     """
     turn_indices = _reactive_user_turn_indices(conversation)
+    goal = _goal_text(conversation)
     per_turn: list[dict[str, Any]] = []
     for idx in turn_indices:
-        prefix = _render_conversation_prefix(conversation, idx)
-        prompt = SATISFACTION_USER.format(conversation=prefix)
+        prompt = SATISFACTION_USER.format(
+            goal=goal,
+            assistant_response=_prev_assistant_response(conversation, idx),
+            monologue=_render_message(conversation[idx]),
+        )
         try:
             resp = client.complete_json(prompt=prompt, system_prompt=SATISFACTION_SYSTEM, max_tokens=max_tokens)
-            score = _clamp_score(resp.get("score"))
-            reason = str(resp.get("reason", ""))[:300]
+            score = _clamp_score(resp.get("emotion_delta"))
+            reason = str(resp.get("feeling", ""))[:300]
         except Exception as exc:  # noqa: BLE001 - one bad turn shouldn't void the transcript
             score = 0
             reason = f"critic error: {type(exc).__name__}: {exc}"

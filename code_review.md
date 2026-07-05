@@ -236,3 +236,173 @@ This section records the implemented changes from the from-scratch Axis-A PVQ wo
 - External anchor (PANDORA or second instrument) is still pending.
 - Structured two-tier evidence output and verifier are still pending.
 - Full GEPA value-only / behavior-only / full prompt runs are still pending; the implemented immediate Axis-A arms are Reddit+Schwartz unoptimized, Reddit-no-psych, and Nemotron.
+---
+
+## J. What the paper's two headline tables compare (decided 2026-07-01)
+
+**Claim discipline.** The main claim is NOT "Reddit+psych personas perform better" (personas
+aren't agents). It is: *behaviorally-grounded persona specifications are a more diagnostic
+evaluation instrument than demographic ones.* Ranking divergence alone cannot establish this
+(R1: sensitivity ≠ validity). The claim rests on three legs:
+1. **E3 error contrast** — demographic arms surface procedural friction; behavioral arms
+   surface substantive trust/reasoning failures (Table 6 taxonomy, redefined).
+2. **E4 shuffle control** — real vectors beat shuffled vectors on held-out prediction
+   → the perturbations carry signal, they are not arbitrary.
+3. **E6 transfer** — shifts persist under an independent simulator + native UX judge.
+
+### Main table (E1/E3)
+- Rows: 5 models × {task success, cum. sat., worst sat., transfer/abandon (3-way terminal
+  taxonomy), STATE-Bench UX where applicable}.
+- Columns (evaluation conditions): **fixed-prompt baseline · Nemotron (set 5) ·
+  Reddit-no-psych (set 6) · Reddit+Schwartz full-GEPA (set 4)**.
+- Companion rows/figure: Kendall τ / Spearman vs fixed-prompt per condition, with bootstrap
+  CIs (cluster bootstrap at persona level); error-taxonomy distribution per condition.
+- The fixed-prompt baseline gets its OWN clearly captioned table (fixes the R3 Table 1
+  caption/text contradiction). Amazon: dropped — delete old §5.4 and Table 8 entirely.
+
+### GEPA table (E2)
+- Rows: sets 1–4 (unoptimized / value-only / behavior-only / full; same Reddit+Schwartz
+  data, same 100 users, same seed prompt, same GEPA budget).
+- Columns: downstream (task success, satisfaction, ranking instability) + persona quality
+  (value alignment, behavioral alignment, grounding, held-out utility, **recitation-leakage
+  rate**).
+- Set 4 is the shared cell with the main table; say so in the caption.
+- Foreground finding: value-only regresses toward recitation / weaker held-out prediction;
+  behavioral signals drive gains.
+
+### Clean causal pairs (call these out in prose)
+- **±Schwartz vector**: set 3 vs set 6 (behavior-only GEPA held constant).
+- **Behavioral vs demographic system**: set 4 vs set 5.
+- **±GEPA**: set 1 vs set 4 (plus the ladder for signal attribution).
+
+---
+
+## K. Execution order (updated; compute is free on Nautilus, wall-clock is the constraint)
+
+**K.0 — Freeze the pairing artifact (TODAY, before anything else finishes).**
+Persist the persona→task assignment (persona_id, task_id, rng seed) used by the in-flight
+set-1 N=100 run as a versioned file, e.g. `eval/assignment_v1.jsonl`. EVERY subsequent
+set × model × benchmark run consumes this same file. Paired task-level deltas (E1/E2/E3
+stats) are impossible without it; an unfrozen assignment means rerunning everything.
+
+**K.1 — Fixed-prompt baseline (parallel, zero dependencies).**
+Stock τ²-bench simulator, same task instances and seeds as K.0, all 5 models. This is half
+of E1 and the table the rejection was built around. Run it now.
+
+**K.2 — GEPA arm configs + reflection-leakage fix in `personaAdapter.py` (this week).**
+See Section L. Then launch the three GEPA runs (value-only, behavior-only, full) on
+Nautilus. These are the long poles; everything downstream of sets 2–4 waits on them.
+
+**K.3 — STATE-Bench injection feasibility read (half-day, gates E6).**
+`state_bench/`, `USE_CUSTOM_CLIENT.md`. Replace the user simulator, don't stack. If not
+clean → switch E6 to UserBench now, not in week 4.
+
+**K.4 — While GEPA runs (no dependency on it):**
+- Nemotron set 5 N=100 generation (already built; scale).
+- Reddit-no-psych set 6 N=100 with the *unoptimized* prompt (Axis-A smoke config) —
+  regenerated later with the behavior-only prompt once GEPA rung 3 lands.
+- **Shuffle control (E4)**: shuffle vectors across ~50 users → regenerate personas →
+  `_utility_score` → permutation test vs real-vector personas. No agent rollouts needed.
+- E4 reporting plumbing: dump alignment/grounding/utility distributions per set;
+  per-step (response, monologue, delta) tuples with IDs + stratified pair-export script
+  (the E5 hooks Jesh needs).
+
+**K.5 — When GEPA prompts land:** generate sets 2, 3, 4 from the same 100 users; regenerate
+set 6 with the behavior-only prompt (matched comparator for set 3).
+
+**K.6 — Downstream evals**, all against `assignment_v1.jsonl`:
+E1 (set 4 vs baseline, τ² + STATE-Bench) → E2 (sets 1–4, τ² subset OK) →
+E3 (3 vs 6; 4 vs 5) → E6 (set 4 on STATE-Bench/UserBench).
+Analysis: cluster bootstrap over personas; Kendall τ/Spearman with CIs; paired deltas;
+**nested convergence curve** — subsample N ∈ {10, 25, 50, 100} personas from the N=100
+runs (free, no new rollouts) and plot rank stability vs N. This directly retires R3's
+"retail reorders between N=10 and N=200" criticism.
+
+**K.7 — Craft pass** (prose, table numbering, Table 6 taxonomy, the two R4 questions,
+Table 1 caption).
+
+Current status note: the in-flight N=100 set-1 run is E2 rung 1 + pipeline shakedown,
+NOT the E1 headline (E1 needs set 4).
+
+---
+
+## L. GEPA loop spec (final; replaces env-toggle soup)
+
+### L.1 Objective signals — decided
+- **Value** = instrument-faithful PVQ-40 round-trip (consistency signal; needed for the
+  value-only arm; labeled diagnostic-not-validation everywhere).
+- **Behavior** = tau judge **+ held-out utility**. Utility is NOT optional: PVQ round-trip
+  and the tau judge are both internal-consistency measures (LLM grading LLM against
+  LLM-written criteria); held-out utility is the only signal anchored to real data the
+  pipeline never saw, and it is the quantity the shuffle control tests. Dropping it
+  re-opens R3's circularity charge.
+- **Grounding** = multiplicative gate `score = base * grounding`, applied identically in
+  ALL optimized arms (sets 2, 3, 4). It is a constraint, not an ablated signal — the
+  ladder varies only what's inside `base`. (Paper wording: "an anti-hallucination
+  constraint applied to every optimized condition," not "part of the full objective.")
+
+### L.2 Arm configs
+One env var / CLI flag `GEPA_ARM ∈ {value_only, behavior_only, full}` that atomically sets:
+
+| arm | base | weights |
+|---|---|---|
+| value_only | align | W_ALIGN=1.0 |
+| behavior_only | tau + utility | W_TAU=0.5, W_UTILITY=0.5 |
+| full | align + tau + utility | W_ALIGN=0.4, W_TAU=0.3, W_UTILITY=0.3 |
+
+Renormalized weights per arm — no dead zero-weighted terms in the sum.
+Held constant across arms: seed prompt (UCSD_PERSONA_PROMPT), trainset/valset files,
+random seeds, MAX_METRIC_CALLS, reflection model, grounding gate. Matched budget is what
+lets us attribute arm differences to the objective, not to optimization effort.
+
+### L.3 The reflection-leakage fix (bug — current code invalidates the ablation)
+`make_reflective_dataset` and `custom_proposal_function` currently expose ALL signals
+(tau critique, utility, grounding text) and a hardcoded full-objective meta-prompt in
+every run. In a value-only run the optimizer still *reads* behavioral feedback even though
+the scalar excludes it → the arms are not isolated. Required changes:
+1. Feedback string includes ONLY the active signals for the arm (+ grounding, since the
+   gate is always on). Inactive signals are omitted from the reflective records entirely
+   (no `Tau Result` field in the value-only reflective dataset).
+2. Per-arm meta-prompt objective text:
+   - value_only: "A good persona reproduces the source user's value profile when surveyed."
+   - behavior_only: "A good persona behaves consistently in interactive tasks and predicts
+     the user's held-out behavior."
+   - full: current combined text.
+3. **Compute ALL signals at eval time in every arm; exclude inactive ones only from the
+   score and feedback.** Log per-iteration trajectories of every signal per arm — this
+   fills [TODO-E3] (per-signal trajectories) and produces the value-only-flatlines-on-
+   behavior figure.
+
+### L.4 Recitation-leakage metric (new, cheap)
+Regex/string detector for Schwartz value names + numeric scores in persona text, logged
+per persona in every arm. Rationale: the grounding gate partially suppresses recitation
+drift in the value-only arm (recited values aren't entailed by posts), so leakage must be
+measured independently of the gate for the E2 regression-toward-recitation story.
+
+### L.5 Artifacts per arm (currently only printed — must persist)
+`gepa_runs/{arm}/`: seed prompt, best prompt (this is what
+`persona_pipeline_datadesigner.py` consumes — fixes the four-arms-share-one-prompt-string
+no-op), ≥2 before/after prompt diffs (TODO-E3), per-iteration per-signal score trajectory
+JSON, run config (weights, seeds, budget).
+
+### L.6 Code hygiene while in there
+- Delete shadowed `from random import random` (line 5; `import random` at line 23 wins).
+- Cache PVQ results keyed by hash(persona_text) — PVQ is re-administered per eval and is
+  the second-most expensive call after the tau sim.
+- Tighten retry decorator's `except (TimeoutError, ConnectionError, Exception)`.
+- Parallelize the sequential per-instance loop in `evaluate()` if wall-clock on the three
+  arms threatens the window.
+
+---
+
+## M. E4 pending-items triage (decided 2026-07-01)
+
+| Item | Decision | Rationale |
+|---|---|---|
+| Shuffle control | **KEEP — required** | Not a downstream experiment: no agent rollouts, no models-under-test. Shuffle vectors → regenerate ~50 personas → `_utility_score` → permutation test. One script, a few hundred LLM calls. It is the validity leg under the "behavioral beats demographic" claim (leg 2 in §J); without it the claim is ranking divergence, i.e. R1's criticism verbatim. |
+| External anchor (PANDORA / 2nd instrument) | **CUT** | One sentence in limitations/future work. No reviewer demanded it. |
+| Two-tier attested/inferred evidence schema | **CUT** | Attribution + grounding/register/role judges + multiplicative gate already cover the grounding story; report their distributions (already computed). The span verifier is heavy engineering for an unattacked claim. Future work. |
+
+Update the F.2 / F.5 rubric rows accordingly: shuffle control stays a `FAIL`-until-present
+check; external anchor and two-tier schema move from `NOT FOUND` (blocking) to
+`DESCOPED (future work)`.

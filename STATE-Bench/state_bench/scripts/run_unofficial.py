@@ -47,6 +47,60 @@ from state_bench.scripts.persona_injection import (
 from state_bench.scripts.satisfaction_critic import score_transcript
 
 
+def run_one_trajectory(
+    *,
+    domain_name: str,
+    task: TaskDefinition,
+    persona_yaml: str,
+    persona_key: str,
+    persona_id: str,
+    persona_path: Path,
+    agent_client,
+    sim_client,
+    agent_class,
+    satisfaction_client,
+    sim_model: str,
+    agent_model: str,
+):
+    """Run one (persona, task) and return the scored Trajectory (no judge).
+
+    Shared by run_unofficial (per-task files) and run_all_personas (reddit-style
+    aggregate). A fresh domain is built per call so the persona wrapper is clean.
+    """
+    domain = get_domain_config(domain_name)
+    domain.build_simulator_prompt = wrap_build_simulator_prompt(
+        domain.build_simulator_prompt, persona_yaml
+    )
+    metadata = {
+        "sim_model": sim_model,
+        "agent_model": agent_model,
+        "persona_key": persona_key,
+        "persona_id": persona_id,
+        "persona_file": str(persona_path),
+        "scoring": "none (unofficial persona run)",
+    }
+    env_data, _ = load_task_environment(domain, task)
+    trajectory = run_task(
+        task,
+        env_data,
+        task.user_id,
+        agent_client,
+        domain=domain,
+        agent=None,
+        env=None,
+        trajectory_metadata=metadata,
+        simulator_client=sim_client,
+        agent_class=agent_class,
+    )
+    trajectory.metadata.update(classify_terminal(trajectory.conversation))
+    trajectory.state_requirements_score = evaluate_state_requirements(
+        task, trajectory.state_diff or StateDiff(created={}, modified={}, deleted={})
+    )
+    if satisfaction_client is not None:
+        trajectory.metadata.update(score_transcript(satisfaction_client, trajectory.conversation))
+    return trajectory
+
+
 def _resolve_persona_files(args: argparse.Namespace) -> list[Path]:
     if args.persona_file:
         return [Path(args.persona_file)]
@@ -113,6 +167,11 @@ def main() -> None:
         action="store_true",
         help="Skip the turn-level satisfaction critic (transcript only).",
     )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip (persona, task) pairs whose output JSON already exists (safe resume).",
+    )
     args = parser.parse_args()
 
     if not args.sim_model:
@@ -139,56 +198,43 @@ def main() -> None:
     summary: list[dict] = []
     for persona_path in persona_files:
         persona_yaml = load_persona_yaml(persona_path)
+        # Key outputs by the YAML filename stem (reddit user_id), NOT persona_profile.id:
+        # the latter collides across users (k100 -> only ~35 unique ids) and overwrites runs.
+        # Mirrors tau2 run_all_personas.py (persona_stem = persona_path.stem).
+        persona_key = persona_path.stem
         persona_id = persona_id_from_yaml(persona_yaml, fallback=persona_path.stem)
-        print(f"\n=== Persona: {persona_id} ({persona_path}) ===")
+        print(f"\n=== Persona: {persona_key} (id={persona_id}, {persona_path}) ===")
 
         for task in tasks:
             user_id = task.user_id
             if not user_id:
                 print(f"  [skip] {task.task_id}: task has no user_id")
                 continue
-            # Fresh domain per (persona, task) so we wrap a clean build_simulator_prompt.
-            domain = get_domain_config(args.domain)
-            domain.build_simulator_prompt = wrap_build_simulator_prompt(
-                domain.build_simulator_prompt, persona_yaml
-            )
-            metadata = {
-                "sim_model": args.sim_model,
-                "agent_model": args.agent_model,
-                "persona_id": persona_id,
-                "persona_file": str(persona_path),
-                "scoring": "none (unofficial persona run)",
-            }
+            output_path = base_output / persona_key / f"{task.task_id}.json"
+            if args.skip_existing and output_path.exists():
+                print(f"  [skip] {task.task_id}: exists")
+                continue
             try:
-                env_data, _ = load_task_environment(domain, task)
-                trajectory = run_task(
-                    task,
-                    env_data,
-                    user_id,
-                    agent_client,
-                    domain=domain,
-                    agent=None,
-                    env=None,
-                    trajectory_metadata=metadata,
-                    simulator_client=sim_client,
+                trajectory = run_one_trajectory(
+                    domain_name=args.domain,
+                    task=task,
+                    persona_yaml=persona_yaml,
+                    persona_key=persona_key,
+                    persona_id=persona_id,
+                    persona_path=persona_path,
+                    agent_client=agent_client,
+                    sim_client=sim_client,
                     agent_class=agent_class,
+                    satisfaction_client=satisfaction_client,
+                    sim_model=args.sim_model,
+                    agent_model=args.agent_model,
                 )
             except Exception as exc:  # noqa: BLE001 - fail loud per task, keep the batch going
                 print(f"  [ERR] {task.task_id}: {type(exc).__name__}: {exc}")
-                summary.append({"task_id": task.task_id, "persona_id": persona_id, "status": "ERR"})
+                summary.append({"task_id": task.task_id, "persona_id": persona_key, "status": "ERR"})
                 continue
 
-            trajectory.metadata.update(classify_terminal(trajectory.conversation))
-            # Deterministic objective axis (no judge): state requirements vs saved state_diff.
-            # Orthogonal to terminal_state, which only reflects persona satisfaction.
-            state_score = evaluate_state_requirements(
-                task, trajectory.state_diff or StateDiff(created={}, modified={}, deleted={})
-            )
-            trajectory.state_requirements_score = state_score
-            # Turn-level satisfaction critic (transcript-only, at end of task).
-            if satisfaction_client is not None:
-                trajectory.metadata.update(score_transcript(satisfaction_client, trajectory.conversation))
-            output_path = base_output / persona_id / f"{task.task_id}.json"
+            state_score = trajectory.state_requirements_score
             trajectory.save(output_path)
             term = trajectory.metadata["terminal_state"]
             trig = trajectory.metadata.get("terminal_trigger")
@@ -202,7 +248,7 @@ def main() -> None:
             summary.append(
                 {
                     "task_id": task.task_id,
-                    "persona_id": persona_id,
+                    "persona_id": persona_key,
                     "status": "OK",
                     "terminal_state": term,
                     "state_requirements_met": state_met,

@@ -320,3 +320,59 @@ Two orthogonal axes per file: `terminal_state` (persona satisfaction, NOT a pass
 `state_requirements_met` (0/1 objective) + `satisfaction_cumulative/_worst_case/_mean/_final`
 + `satisfaction_per_turn[]`. See `STATE-Bench/instruction.md` for the full design.
 
+
+
+PARNTER PROMPT: _SYSTEM_PROMPT = “”"\
+You are evaluating how a user’s emotion changes after a single interaction step.
+The user’s INTERNAL MONOLOGUE reflects their true thoughts and feelings.
+---
+# INPUT
+You are given:
+- the user’s goal
+- the assistant’s previous response
+- the user’s INTERNAL MONOLOGUE after that response
+---
+# TASK
+Determine how the user’s emotion changed as a result of the assistant’s response.
+---
+# OUTPUT
+Return:
+emotion_delta ∈ [-10, +10]
+---
+# GUIDELINES
+Base your judgment primarily on the INTERNAL MONOLOGUE.
+Interpret the monologue as the user’s reaction to the assistant’s response.
+Use the following scale consistently:
+- No emotional change → 0
+- Mild reaction (slight concern, mild satisfaction) → ±1 to ±3
+- Moderate reaction (noticeable concern, annoyance, appreciation) → ±4 to ±6
+- Strong emotion (frustration, relief, disappointment) → ±7 to ±9
+- Very strong emotion (e.g., “unacceptable”, escalation, demanding supervisor) → ±9 to ±10
+CRITICAL:
+- Strong emotional language MUST produce large magnitude deltas (≥ |8|)
+- Do NOT underestimate frustration or escalation signals
+- If the monologue expresses increasing frustration, assign a negative delta
+- If it expresses relief or satisfaction, assign a positive delta
+- If the monologue contains only planning or neutral reasoning, assign 0 or a very small delta
+---
+# IMPORTANT
+- Do NOT consider any future conversation
+- Do NOT try to maintain or infer an absolute score
+- Only estimate the CHANGE in emotion at this step
+---
+# RESPONSE FORMAT
+{
+  “emotion_delta”: <number>,
+  “feeling”: “<brief explanation grounded in the internal monologue>”
+}“”"
+
+
+<!-- 
+uv run python -m state_bench.scripts.run_unofficial \
+  --domain $DOMAIN \
+  --task $TASKS \
+  --persona-dir ../reddit/.personas_yaml_cache_personas_axis_a_reddit_schwartz_unopt_k100 \
+  --sim-model gemma \
+  --agent-model gpt-oss \
+  --no-satisfaction \
+  --output-dir outputs/${DOMAIN}_persona_k100  -->
