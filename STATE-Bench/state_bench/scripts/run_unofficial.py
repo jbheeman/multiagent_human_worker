@@ -51,10 +51,10 @@ def run_one_trajectory(
     *,
     domain_name: str,
     task: TaskDefinition,
-    persona_yaml: str,
+    persona_yaml: str | None,
     persona_key: str,
-    persona_id: str,
-    persona_path: Path,
+    persona_id: str | None,
+    persona_path: Path | None,
     agent_client,
     sim_client,
     agent_class,
@@ -66,18 +66,23 @@ def run_one_trajectory(
 
     Shared by run_unofficial (per-task files) and run_all_personas (reddit-style
     aggregate). A fresh domain is built per call so the persona wrapper is clean.
+
+    persona_yaml=None => BASELINE: the persona behavioral layer is NOT injected; the
+    domain's stock build_simulator_prompt (task-driven) runs unchanged. Isolates the
+    effect of persona injection.
     """
     domain = get_domain_config(domain_name)
-    domain.build_simulator_prompt = wrap_build_simulator_prompt(
-        domain.build_simulator_prompt, persona_yaml
-    )
+    if persona_yaml is not None:
+        domain.build_simulator_prompt = wrap_build_simulator_prompt(
+            domain.build_simulator_prompt, persona_yaml
+        )
     metadata = {
         "sim_model": sim_model,
         "agent_model": agent_model,
         "persona_key": persona_key,
         "persona_id": persona_id,
-        "persona_file": str(persona_path),
-        "scoring": "none (unofficial persona run)",
+        "persona_file": str(persona_path) if persona_path is not None else None,
+        "scoring": "baseline (no persona)" if persona_yaml is None else "none (unofficial persona run)",
     }
     env_data, _ = load_task_environment(domain, task)
     trajectory = run_task(

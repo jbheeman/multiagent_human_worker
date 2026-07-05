@@ -327,6 +327,30 @@ uv run python -m state_bench.scripts.merge_to_eval \
 
 Model/sim labels are read from the per-task JSONs, so no need to re-specify them.
 
+### E.3 No-persona baseline
+
+`--no-persona` runs the **stock, task-driven STATE-Bench simulator with no persona layer
+injected** — the fixed-prompt baseline (code_review.md K.1) that isolates the effect of
+persona injection. One run per model on the same 20 tasks, written as `baseline_<model>_<domain>.json`:
+
+```bash
+uv run python -m state_bench.scripts.run_all_personas \
+  --models gpt-oss \
+  --domain travel --num-tasks 20 \
+  --sim-model gemma \
+  --eval-dir ../reddit/Eval/statebench_baseline_gpt_oss_travel \
+  --no-persona --skip-existing
+```
+
+Do NOT pass `--personas-jsonl` / `--persona-dir` with `--no-persona` (it errors). Same
+envelope as the persona runs, so it's directly comparable.
+
+**Caveat:** `terminal_state` relies on the persona convention of emitting `[TASK_DONE]` /
+`[TERMINAL:…]` tags. The stock simulator emits none, so baseline runs mostly show
+`terminal_state=incomplete` and run to max turns. For baseline-vs-persona comparison the
+meaningful axis is the deterministic `state_requirements_met` (+ `satisfaction_*` if enabled),
+not `terminal_state`.
+
 ## F. Monitor / resume
 
 ```bash

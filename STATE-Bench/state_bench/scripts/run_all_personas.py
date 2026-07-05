@@ -125,20 +125,32 @@ def main() -> None:
     )
     parser.add_argument("--no-satisfaction", action="store_true", help="Skip the satisfaction critic.")
     parser.add_argument("--skip-existing", action="store_true", help="Skip (model, persona) whose aggregate JSON exists.")
+    parser.add_argument(
+        "--no-persona",
+        action="store_true",
+        help="BASELINE: no persona injected; run the stock (task-driven) simulator once per model.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print planned runs and output paths only.")
     args = parser.parse_args()
 
     if str(args.eval_dir).strip() in ("", "="):
         raise SystemExit("Invalid --eval-dir (did you leave spaces? use --eval-dir /path or --eval-dir=/path)")
 
-    persona_files = _resolve_personas(args)
+    if args.no_persona:
+        if args.personas_jsonl or args.personas_dir:
+            raise SystemExit("--no-persona is a baseline; do not pass --personas-jsonl / --persona-dir.")
+        # One synthetic "baseline" job: (persona_key, persona_path=None).
+        persona_files: list[Path | None] = [None]
+    else:
+        persona_files = _resolve_personas(args)
     tasks = _resolve_tasks(args.domain, args.task, args.num_tasks)
     eval_dir = args.eval_dir.resolve()
     commit = _git_commit()
 
+    persona_desc = "BASELINE (no persona)" if args.no_persona else f"personas={len(persona_files)}"
     print(
         f"Domain={args.domain} | models={args.models} | sim={args.sim_model} | "
-        f"personas={len(persona_files)} | tasks={len(tasks)} | "
+        f"{persona_desc} | tasks={len(tasks)} | "
         f"satisfaction={'OFF' if args.no_satisfaction else args.satisfaction_model} | judge=OFF"
     )
 
@@ -158,7 +170,7 @@ def main() -> None:
         model_label = to_fs_label(model)
         model_dir = eval_dir / model_label
         for persona_path in persona_files:
-            persona_key = persona_path.stem
+            persona_key = "baseline" if persona_path is None else persona_path.stem
             dest = model_dir / f"{persona_key}_{model_label}_{args.domain}.json"
 
             if args.dry_run:
@@ -169,8 +181,12 @@ def main() -> None:
                 print(f"[skip] model={model} persona={persona_key} (exists: {dest})")
                 continue
 
-            persona_yaml = load_persona_yaml(persona_path)
-            persona_id = persona_id_from_yaml(persona_yaml, fallback=persona_key)
+            if persona_path is None:
+                persona_yaml = None
+                persona_id = None
+            else:
+                persona_yaml = load_persona_yaml(persona_path)
+                persona_id = persona_id_from_yaml(persona_yaml, fallback=persona_key)
             print(f"[run] model={model} persona={persona_key} (id={persona_id}) ...")
 
             simulations: list[dict] = []
