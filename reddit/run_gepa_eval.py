@@ -30,9 +30,16 @@ from __future__ import annotations
 import os
 import threading
 
+import litellm
 import tau2.run as _tau2_run
 from tau2.run import get_tasks, run_task
 from tau2.evaluator.evaluator import EvaluationType
+
+# tau2 drives its sims through litellm.completion(), which verifies SSL by default.
+# The NRP/Nautilus endpoint has cert issues (personaAdapter's persona/teacher models
+# use httpx verify=False for the same reason), so without this every tau sim's LLM
+# call fails with an SSL error. Match the codebase's existing verify=False handling.
+litellm.ssl_verify = False
 
 
 NRP_ENDPOINT = os.getenv("NRP_ENDPOINT", "https://ellm.nrp-nautilus.io/v1")
