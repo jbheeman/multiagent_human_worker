@@ -27,16 +27,25 @@ from tau2.utils.llm_utils import generate
 
 
 PERSONA_ENV_VAR = "TAU2_PERSONA_FILE"
+NO_PERSONA_ENV_VAR = "TAU2_NO_PERSONA"
 _DEFAULT_PERSONA_PATH = (
     Path(__file__).parent / "eval_personas" / "afcagroo.yaml"
 )
 
 
-def _load_persona_yaml() -> tuple[str, Path]:
+def _is_no_persona() -> bool:
+    return os.getenv(NO_PERSONA_ENV_VAR, "").strip().lower() in ("1", "true", "yes")
+
+
+def _load_persona_yaml() -> tuple[str, Optional[Path]]:
     """
     Load persona YAML content and return (content, path).
-    Prefers TAU2_PERSONA_FILE env var; falls back to default path.
+    When TAU2_NO_PERSONA=1, returns ("", None) for baseline (task-driven) runs.
+    Otherwise prefers TAU2_PERSONA_FILE env var; falls back to default path.
     """
+    if _is_no_persona():
+        return "", None
+
     env_path = os.getenv(PERSONA_ENV_VAR)
     if env_path:
         persona_path = Path(env_path).expanduser().resolve()
@@ -55,7 +64,7 @@ def _load_persona_yaml() -> tuple[str, Path]:
 
 
 yaml_content, persona_yaml_path = _load_persona_yaml()
-persona_name = persona_yaml_path.stem
+persona_name = "baseline" if persona_yaml_path is None else persona_yaml_path.stem
 
 GLOBAL_USER_SIM_GUIDELINES_DIR = DATA_DIR / "tau2" / "user_simulator"
 
@@ -88,12 +97,20 @@ def get_global_user_sim_guidelines(use_tools: bool = False) -> str:
     return user_sim_guidelines
 
 
-SYSTEM_PROMPT = """
+SYSTEM_PROMPT_WITH_PERSONA = """
 {global_user_sim_guidelines}
 
 <PERSONA_BEHAVIORAL_SPEC>
 {yaml_content}
 </PERSONA_BEHAVIORAL_SPEC>
+
+<scenario>
+{instructions}
+</scenario>
+""".strip()
+
+SYSTEM_PROMPT_BASELINE = """
+{global_user_sim_guidelines}
 
 <scenario>
 {instructions}
@@ -133,11 +150,17 @@ class UserSimulator(BaseUser):
         if self.instructions is None:
             logger.warning("No instructions provided for user simulator")
 
-        system_prompt = SYSTEM_PROMPT.format(
-            global_user_sim_guidelines=self.global_simulation_guidelines,
-            instructions=self.instructions,
-            yaml_content=self.yaml_content,
-        )
+        if self.yaml_content:
+            system_prompt = SYSTEM_PROMPT_WITH_PERSONA.format(
+                global_user_sim_guidelines=self.global_simulation_guidelines,
+                instructions=self.instructions,
+                yaml_content=self.yaml_content,
+            )
+        else:
+            system_prompt = SYSTEM_PROMPT_BASELINE.format(
+                global_user_sim_guidelines=self.global_simulation_guidelines,
+                instructions=self.instructions,
+            )
         return system_prompt
 
     def get_init_state(
