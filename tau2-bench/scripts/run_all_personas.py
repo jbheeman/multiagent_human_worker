@@ -13,6 +13,10 @@ Usage:
   python scripts/run_all_personas.py --models gpt-4o \
     --personas-jsonl ../reddit/personas_gepa_unopt.jsonl --eval-dir ../reddit/Eval/gepa_unopt
 
+  # Baseline (no persona): one run per model, same layout as STATE-Bench --no-persona
+  python scripts/run_all_personas.py --models gpt-4o --domain retail --num-tasks 20 \
+    --eval-dir ../reddit/Eval/tau2_baseline --no-persona --skip-existing
+
 Each run uses TAU2_PERSONA_FILE so the saved JSON includes persona_name/persona_file in user_info.
 Output is saved to data/simulations/<model>_<persona>.json then copied to <eval_dir>/<model>/<persona>_<model>.json.
 """
@@ -138,6 +142,11 @@ def main() -> None:
         help="Skip (model, persona) pairs that already have output in <eval_dir>/<model>/<persona>_<model>.json.",
     )
     parser.add_argument(
+        "--no-persona",
+        action="store_true",
+        help="BASELINE: no persona injected; run the stock (task-driven) simulator once per model.",
+    )
+    parser.add_argument(
         "--max-retries",
         type=int,
         default=9,
@@ -152,10 +161,16 @@ def main() -> None:
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
+    if args.no_persona and (args.personas_dir or args.personas_jsonl):
+        print(
+            "--no-persona is a baseline; do not pass --personas-jsonl / --personas-dir.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if args.personas_dir and args.personas_jsonl:
         print("Use only one of --personas-dir or --personas-jsonl.", file=sys.stderr)
         sys.exit(1)
-    if args.personas_dir is None and args.personas_jsonl is None:
+    if not args.no_persona and args.personas_dir is None and args.personas_jsonl is None:
         args.personas_dir = repo_root / "src" / "tau2" / "user" / "eval_personas"
     if args.eval_dir is None:
         args.eval_dir = repo_root.parent / "multiagent_human_worker" / "reddit" / "Eval"
@@ -175,7 +190,10 @@ def main() -> None:
         print(f"Eval dir is not a directory: {args.eval_dir}", file=sys.stderr)
         sys.exit(1)
 
-    if args.personas_jsonl:
+    if args.no_persona:
+        persona_runs: list[tuple[str, Path | None]] = [("baseline", None)]
+        print("Mode=BASELINE (no persona)")
+    elif args.personas_jsonl:
         args.personas_jsonl = args.personas_jsonl.resolve()
         if not args.personas_jsonl.is_file():
             print(f"Personas JSONL not found: {args.personas_jsonl}", file=sys.stderr)
@@ -194,6 +212,7 @@ def main() -> None:
             f"Loaded {len(persona_files)} persona(s) from {args.personas_jsonl} "
             f"(cache: {cache_dir})"
         )
+        persona_runs = [(persona_path.stem, persona_path) for persona_path in persona_files]
     else:
         args.personas_dir = args.personas_dir.resolve()
         if not args.personas_dir.is_dir():
@@ -203,10 +222,11 @@ def main() -> None:
         if not persona_files:
             print(f"No .yaml files in {args.personas_dir}", file=sys.stderr)
             sys.exit(1)
+        persona_runs = [(persona_path.stem, persona_path) for persona_path in persona_files]
 
-    if args.expected_personas > 0 and len(persona_files) != args.expected_personas:
+    if args.expected_personas > 0 and len(persona_runs) != args.expected_personas:
         print(
-            f"Expected {args.expected_personas} personas, found {len(persona_files)}",
+            f"Expected {args.expected_personas} personas, found {len(persona_runs)}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -232,19 +252,26 @@ def main() -> None:
         if not args.dry_run:
             model_dir.mkdir(parents=True, exist_ok=True)
 
-        for persona_path in persona_files:
-            persona_stem = persona_path.stem
+        for persona_stem, persona_path in persona_runs:
             save_to = f"{model_label}_{persona_stem}_{args.domain}"
             run_save_path = args.simulations_dir / f"{save_to}.json"
             dest_path = model_dir / f"{persona_stem}_{model_label}_{args.domain}.json"
 
             env = os.environ.copy()
-            env["TAU2_PERSONA_FILE"] = str(persona_path.resolve())
+            if persona_path is None:
+                env.pop("TAU2_PERSONA_FILE", None)
+                env["TAU2_NO_PERSONA"] = "1"
+            else:
+                env.pop("TAU2_NO_PERSONA", None)
+                env["TAU2_PERSONA_FILE"] = str(persona_path.resolve())
 
             cmd = base_cmd + ["--agent-llm", agent_llm, "--save-to", save_to]
 
             if args.dry_run:
-                print(f"TAU2_PERSONA_FILE={env['TAU2_PERSONA_FILE']}")
+                if persona_path is None:
+                    print("TAU2_NO_PERSONA=1")
+                else:
+                    print(f"TAU2_PERSONA_FILE={env['TAU2_PERSONA_FILE']}")
                 print(" ".join(cmd))
                 print(f"  -> copy to {dest_path}\n")
                 continue
