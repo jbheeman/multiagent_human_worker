@@ -100,6 +100,35 @@ def persona_to_yaml(persona: dict) -> str:
 # raw Schwartz JSON or recite values-by-number. Replace this with
 # gepa_result.best_candidate["persona_prompt"].
 
+OPTIMIZED_GEPA_FULL_PROMPT = """\
+You are an expert psychological profiler. From the user's behavioral corpus, write a functional first-person behavioral profile — psychologically vivid enough that someone reading it could predict how this person communicates, argues, and reacts under pressure in a task-oriented dialogue.
+
+Do not write rigid rules ("never give my zip code"). Write the psychological reasoning ("I treat personal data like something to hoard because..."). Do not write dialogues, transcripts, or invented transactional details.
+
+USER CORPUS (speaker-attributed; [USER]/[INTERLOCUTOR]/[QUOTED] turns under [r/subreddit] headers):
+{{ user_corpus }}
+
+CORPUS INSTRUCTIONS:
+- Build the profile ONLY from USER turns — character, register, disposition, triggers.
+- INTERLOCUTOR and QUOTED turns are context for how this user argues and reacts; never attribute quoted views, beliefs, or biography to the profile.
+- Transfer how they write and argue, not their Reddit topics or subculture jargon as identity.
+- ABSTRACT THE METHOD, NOT THE METAPHOR: If a user argues about sports fouls to demand precision, do not write "I treat vague language like a foul call." Write "I treat vague language as a risk to accuracy that requires immediate clarification." Keep the cognitive drive, drop the topic-specific analogy. The profile must remain valid even if the interaction format changes from forum post to direct task.
+- VALUE-CALIBRATED INTENSITY: Use the Latent Value Profile to weight the intensity of behaviors. If a value score is low (<0.35), do not write behaviors driven by that value even if the corpus shows occasional spikes. Prioritize the top 2-3 values from the vector as the core drivers. A user with low "Power" scores must not sound domineering, even if they are confident.
+- GROUNDING IS ABSOLUTE: You cannot attribute a writing habit (bullets, edits, headers, specific punctuation) to the user unless it appears in the provided USER CORPUS. If the user writes in paragraphs, do not claim "I use bullet points." If the user does not use "Edit:" tags, do not claim "I add Edit notes."
+- TONAL FIDELITY: Match the corpus temperature exactly. Do not invent hostility, profanity, or emotional intensity unless it is present in the text. Do not invent physical modalities (raising voice, physical presence) for text-based users. A user who writes politely about marriage must be profiled as polite, even if their values suggest "passion." Do not sand down a hostile user, but do not amplify a polite one.
+- REGISTER IS NON-NEGOTIABLE: Match the source's actual vocabulary level and sentence length. Do not upgrade their diction, smooth their syntax, or wrap the profile in essay structure (headers, roman numerals, bolded thesis lines) unless the user actually writes that way.
+
+LATENT VALUE PROFILE (use this vector to weight the priority and intensity of traits observed in the corpus; treat it as research you will never quote, not as vocabulary to use):
+{{ schwartz_json }}
+
+VALUE-NAME LEAK IS A FAILURE, NOT A STYLE CHOICE. Never write the literal Schwartz dimension names or close derivatives -- in any form (capitalized, lowercase, or as an adjective/noun) -- including: power, achievement, hedonism/hedonistic, stimulation, self-direction, universalism, benevolence, tradition, conformity, security. Do not print numbers, percentages, or vector/profile language ("my X score", "my vector", "rates high on Y", "feeds my Z streak"). Express the SAME priorities only through what the person notices, wants, argues for, and reacts to -- never through the label of the value itself. Use the values to understand *why* the user cares, but NEVER let them override the *style* observed in the corpus. Before finishing, re-read every sentence for one of the banned words above and rewrite it if found.
+
+BEHAVIORAL PREDICTION CHECK: Ensure every psychological claim implies an observable action in a dialogue. Instead of abstract traits ("I value precision"), describe the reaction ("I interrupt vague answers to request exact timestamps"). Focus on **triggers** (what frustrates them), **verification** (how they confirm truth), and **escalation** (what makes them demand authority), rather than **narrative flow** (how they order sentences). The goal is to simulate a user in a customer-support task, not to replicate a forum post. Ensure behaviors are **Cross-Context Valid**: Would this behavior still make sense if the user were booking a flight instead of discussing sports? If not, generalize the underlying need.
+
+EXTERNAL CONTENT THIS USER QUOTED OR ENGAGED WITH (selection + stance; secondary signal):
+{{ quote_signals }}
+"""
+
 GEPA_PARAGRAPH_PROMPT = """\
 You are an expert psychological profiler. From the user's behavioral corpus, write a
 self-explanatory first-person portrait — psychologically vivid enough that someone
@@ -216,13 +245,13 @@ def make_model_configs():
         ),
         ModelConfig(
             alias=CRITIC_ALIAS,
-            model=os.getenv("CRITIC_MODEL", "gpt-oss"),
+            model=os.getenv("CRITIC_MODEL", "kimi"),
             provider=PROVIDER_NAME,
             inference_parameters=ChatCompletionInferenceParams(max_parallel_requests=critic_parallel),
         ),
         ModelConfig(
             alias=CRITIC_FAST_ALIAS,
-            model=os.getenv("CRITIC_FAST_MODEL", "gpt-oss"),
+            model=os.getenv("CRITIC_FAST_MODEL", "kimi"),
             provider=PROVIDER_NAME,
             inference_parameters=ChatCompletionInferenceParams(max_parallel_requests=critic_fast_parallel),
         ),
@@ -250,7 +279,7 @@ class Arm(str, Enum):
 
 # Each GEPA arm gets its own optimized prompt string (swap in the GEPA outputs).
 ARM_PROMPTS = {
-    Arm.GEPA_FULL: GEPA_PARAGRAPH_PROMPT,
+    Arm.GEPA_FULL: OPTIMIZED_GEPA_FULL_PROMPT,
     Arm.GEPA_UNOPT: GEPA_PARAGRAPH_PROMPT,
     Arm.GEPA_VALUE_ONLY: GEPA_PARAGRAPH_PROMPT,
     Arm.GEPA_BEHAVIOR_ONLY: GEPA_PARAGRAPH_PROMPT,
@@ -814,3 +843,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
