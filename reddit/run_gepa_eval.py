@@ -9,6 +9,12 @@ Design choices (all env-overridable):
   * Domain: the lightweight `mock` domain by default — a fast, deterministic
     customer-support environment, so the tau signal measures behavioral
     consistency without depending on retail/airline task realism.
+  * Task selection: deterministic hash of `user_id` over the mock task pool
+    excluding `impossible_task_*` (agent transfers on turn one → 2-turn stubs,
+    systematically compressed/noisy tau scores). Every candidate prompt for the
+    same user is compared on the identical persona–task pair; diversity lives
+    across users, not as noise within candidate comparisons. Held-out transfer
+    is retail/telecom/airline — mock is the training signal, not a transfer claim.
   * In-process `tau2.run.run_task` (not the `tau2 run` CLI) so there is no
     subprocess / results-file overhead per metric call.
   * Models routed to the NRP endpoint via litellm (api_base/api_key in llm_args).
@@ -27,6 +33,7 @@ sims therefore serialize; the caller's other signals still parallelize.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 
@@ -46,10 +53,9 @@ NRP_ENDPOINT = os.getenv("NRP_ENDPOINT", "https://ellm.nrp-nautilus.io/v1")
 NAUT_API_KEY = os.getenv("NAUT_API_KEY")
 
 TAU_DOMAIN = os.getenv("TAU_DOMAIN", "mock")
-TAU_AGENT_LLM = os.getenv("TAU_AGENT_LLM", "openai/gpt-oss")
+TAU_AGENT_LLM = os.getenv("TAU_AGENT_LLM", "openai/kimi")
 TAU_USER_LLM = os.getenv("TAU_USER_LLM", "openai/gemma")
 TAU_MAX_STEPS = int(os.getenv("TAU_MAX_STEPS", "30"))
-TAU_TASK_INDEX = int(os.getenv("TAU_TASK_INDEX", "0"))
 TAU_SEED = int(os.getenv("TAU_SEED", "300"))
 
 # litellm's openai provider also reads these; set them as a fallback to the
@@ -60,19 +66,43 @@ os.environ.setdefault("OPENAI_API_BASE", NRP_ENDPOINT)
 
 _LLM_ARGS = {"temperature": 0.0, "api_base": NRP_ENDPOINT, "api_key": NAUT_API_KEY}
 
-# Tasks are loaded once (pure JSON read, no LLM).
-_TASKS = get_tasks(TAU_DOMAIN)
+# Tasks are loaded once (pure JSON read, no LLM). Drop impossible_task_*: dry-run
+# showed the fixed agent transfers on the first user turn, leaving ~2 user turns
+# and nothing for the behavioral judge to verify (noise, not construct-validity).
+_ALL_TASKS = get_tasks(TAU_DOMAIN)
+_TASKS = [t for t in _ALL_TASKS if not str(t.id).startswith("impossible_task_")]
+if not _TASKS:
+    raise RuntimeError(f"No usable tasks in domain {TAU_DOMAIN!r} after excluding impossible_task_*")
 
 # run_task reads the module-global persona mid-call, so concurrent sims must not
 # clobber each other's persona. Serialize the set-global + sim critical section.
 _TAU_LOCK = threading.Lock()
 
 
-def run_evaluation(persona_yaml: str):
+def select_task(user_id: str):
+    """Deterministic user_id → task assignment over the usable mock pool."""
+    if not user_id:
+        raise ValueError("user_id is required for deterministic tau task assignment")
+    idx = int(hashlib.md5(user_id.encode("utf-8")).hexdigest(), 16) % len(_TASKS)
+    return _TASKS[idx]
+
+
+def run_evaluation(persona_yaml: str, user_id: str, *, task_id: str | None = None):
     """Run one tau2 simulation with `persona_yaml` as the user simulator's
     behavioral spec (the same PersonaProfile YAML the production sims consume).
-    Returns the tau2 SimulationRun."""
-    task = _TASKS[TAU_TASK_INDEX % len(_TASKS)]
+
+    Task is `hash(user_id) % len(pool)` unless `task_id` is passed (dry-runs /
+    forced probes). Seed stays fixed so candidate comparisons for the same
+    persona–task pair are not RNG-noisy.
+    Returns the tau2 SimulationRun.
+    """
+    if task_id is not None:
+        matches = [t for t in _ALL_TASKS if t.id == task_id]
+        if not matches:
+            raise ValueError(f"Unknown task_id={task_id!r} in domain {TAU_DOMAIN}")
+        task = matches[0]
+    else:
+        task = select_task(user_id)
     with _TAU_LOCK:
         # Inject the persona into the global the user simulator reads via run_task,
         # then run the whole sim before another thread can overwrite it.

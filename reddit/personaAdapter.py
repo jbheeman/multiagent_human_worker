@@ -21,7 +21,7 @@ import httpx
 
 import time
 from functools import wraps
-from run_gepa_eval import run_evaluation, clean_transcript_for_judge
+from run_gepa_eval import run_evaluation, clean_transcript_for_judge, select_task
 import random
 from alignment import schwartz_alignment
 from pvq import PVQ_DATA, score_pvq_value_means
@@ -143,7 +143,6 @@ http_client = httpx.Client(verify=False)
 #This model generates the persona description
 persona_model = OpenAIServerModel(
         model_id="gpt-oss",
-        model_id="gpt-oss",
         api_base="https://ellm.nrp-nautilus.io/v1",
         api_key=os.getenv("NAUT_API_KEY"),
         client_kwargs={"http_client": http_client}
@@ -151,7 +150,7 @@ persona_model = OpenAIServerModel(
 
 #This model evaluates the persona description
 teacher_model_raw= OpenAIServerModel( # Still used for persona agent
-        model_id="gpt-oss",
+        model_id="minimax-m2",
         api_base="https://ellm.nrp-nautilus.io/v1",
         api_key=os.getenv("NAUT_API_KEY"),
         client_kwargs={"http_client": http_client}
@@ -204,7 +203,8 @@ class PersonaTrajectory:
     grounding_score: float = 1.0  # anti-hallucination gate (persona vs posts)
     utility_score: float = 0.0    # held-out behavioral prediction
     combined_score: float = 0.0  # weighted: value alignment + tau + utility, gated by grounding
-    valid: bool = True           # False if an ACTIVE signal hard-failed => excluded from reflection
+    valid: bool = True           # False if an ACTIVE signal API-failed => excluded from reflection
+                                 # (compile defects stay valid so GEPA can learn from them)
 
     @property
     def total_score(self) -> float:
@@ -383,9 +383,11 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         # cache successful results by persona text hash to avoid redundant calls.
         self._pvq_cache: dict[int, dict] = {}
         # Distractor pool for the utility ranking (built in __main__).
+        # Sampling RNG is derived per user_id (not a shared Random) so the
+        # distractor set is a pure function of the user — frozen across candidate
+        # evals and thread-safe under ThreadPoolExecutor.
         self._candidates: list[dict] = []
         self._user_split: dict[str, str] = {}
-        self._util_rng = random.Random(1234)
         self._distractor_tier_counts: dict[int, int] = {}
         # Per-arm run dir for persistence; set in __main__.
         self._run_dir: str | None = None
@@ -418,7 +420,12 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
     def _sample_distractors(self, d: "PersonaDataInst", K: int | None = None) -> list[str]:
         """K same-split, non-self distractors with length parity to the true post.
         Tier 1: same-subreddit history posts; Tier 2: any posts; Tier 3: global
-        (length filter dropped). Logs which fallback fired."""
+        (length filter dropped). Logs which fallback fired.
+
+        Distractor set is frozen per user: RNG seed is `1234:{user_id}`, so the
+        same user always draws the same set across candidate evaluations and
+        threads (no shared-RNG interleaving noise in the utility ranking).
+        """
         K = K or UTILITY_K
         if not self._candidates:
             return []
@@ -443,7 +450,8 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
             tier = 3
         if not pool:
             return []
-        chosen = self._util_rng.sample(pool, min(K, len(pool)))
+        rng = random.Random(f"1234:{d.user_id}")
+        chosen = rng.sample(pool, min(K, len(pool)))
         self._distractor_tier_counts[tier] = self._distractor_tier_counts.get(tier, 0) + 1
         if tier > 1:
             print(f"Distractor fallback tier {tier} for {d.user_id} (pool={len(pool)})")
@@ -585,8 +593,8 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         """Mirror the production pipeline: paragraph -> structured PersonaProfile ->
         YAML. The tau2 user simulator is driven by that YAML (not the free-text
         paragraph), so the tau signal reflects the SAME artifact the real sims run
-        on. Returns the YAML string, or None on hard failure so the trajectory is
-        excluded rather than scored on a malformed spec."""
+        on. Returns the YAML string, or None if the paragraph cannot compile to a
+        schema-valid PersonaProfile (a prompt-attributable defect)."""
         schema = json.dumps(PersonaProfile.model_json_schema())
         prompt = PERSONA_COMPILE_PROMPT.format(schema=schema, paragraph=paragraph)
         for attempt in range(2):
@@ -606,25 +614,50 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
 
     def _score_persona_with_tau(self, persona_description: str, user_id: str = "") -> dict | None:
         """
-        Runs Tau Bench and returns a dict with 'score' (1-5) and 'critique', or
-        None on hard failure (so the trajectory is EXCLUDED from the reflective
-        dataset rather than scored 0 and learned from as noise). Scores OBSERVABLE
-        behavioral consistency, not value-recitation.
+        Runs Tau Bench and returns a dict with 'score' (1-5) and 'critique'.
 
-        The sim is driven by the compiled PersonaProfile YAML (production path); the
-        judge scores the resulting transcript against the ORIGINAL paragraph — the
-        GEPA artifact under optimization — so the signal is end-to-end: does the
-        paragraph, once compiled and run, produce faithful behavior?
+        Failure modes (caller must treat differently):
+          * Compile failure → {'score': 0, 'critique': 'failed to compile...'}.
+            Prompt-attributable: keep in the score as tau=0 and in reflection.
+          * API / sim / judge failure → None. Transient noise: exclude from
+            reflection and drop the tau term from the renormalized GEPA score.
+
+        Scores OBSERVABLE behavioral consistency, not value-recitation. The sim is
+        driven by the compiled PersonaProfile YAML (production path); the judge
+        scores the transcript against the ORIGINAL paragraph — the GEPA artifact
+        under optimization.
         """
+        if not user_id:
+            raise ValueError("user_id is required for deterministic tau task assignment")
         if MOCK_LLM:
             return {"score": 3, "critique": "mock tau result"}
 
         # 1. Compile to the YAML spec the real sims consume, then run the sim.
+        #    Task is hash(user_id) over the mock pool — same user always gets the
+        #    same task so candidate prompts are compared on identical pairs.
         persona_yaml = self._compile_persona_to_yaml(persona_description, user_id)
         if persona_yaml is None:
-            return None  # can't build the spec the real sim would use -> exclude
-        result = run_evaluation(persona_yaml)
-        clean_transcript = clean_transcript_for_judge(result)
+            return {
+                "score": 0,
+                "critique": "failed to compile to PersonaProfile schema",
+            }
+        try:
+            task = select_task(user_id)
+            result = run_evaluation(persona_yaml, user_id)
+            clean_transcript = clean_transcript_for_judge(result)
+        except Exception as e:
+            print(f"Tau sim API failure for {user_id}: {e}")
+            return None
+
+        # Impossible-task guard: request cannot be fulfilled with available tools;
+        # don't let the judge treat correct frustration/escalation as a miss.
+        task_note = ""
+        if str(getattr(task, "id", "")).startswith("impossible_task_"):
+            task_note = (
+                "\n        **TASK CONTEXT:** The user's request cannot be fulfilled "
+                "with the available tools; appropriate user behavior ranges from "
+                "acceptance to escalation depending on the profile.\n"
+            )
 
         # 2. Behavioral judge (P3): reward observable interaction quality, NOT the
         #    persona naming its own psychological values in the monologue. The judge
@@ -666,7 +699,7 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         ### INPUT DATA
         **PERSONA:**
         {persona_description}
-
+        {task_note}
         **TRANSCRIPT:**
         {clean_transcript}
 
@@ -686,6 +719,7 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
 
         formatted_prompt = TAU_ALIGNMENT_JUDGE_PROMPT.format(
             persona_description=persona_description,
+            task_note=task_note,
             clean_transcript=clean_transcript,
         )
 
@@ -699,7 +733,7 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                 samples.append(parsed["score"])
                 critique = parsed["critique"] or critique
         if not samples:
-            return None
+            return None  # judge API/parse failure — exclude + renormalize
         median_score = sorted(samples)[len(samples) // 2]
         return {"score": median_score, "critique": critique or ""}
 
@@ -719,10 +753,10 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         if not persona_text or not posts:
             return 0.5
 
-        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", persona_text) if len(s.strip()) > 20]
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", persona_text) if len(s.strip()) > 35]
         if not sentences:
             return 0.5
-        sentences = sentences[:20]  # cap cost
+        sentences = sentences[:35]  # cap cost
 
         try:
             post_emb = eval_model.encode(posts, normalize_embeddings=True)
@@ -812,8 +846,13 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
     def _evaluate_one(self, data_inst: PersonaDataInst, prompt_template: str) -> PersonaTrajectory:
         """Score a single instance. Only ACTIVE signals (weight > 0) are computed;
         inactive ones are skipped to avoid paying for tau sims / utility / PVQ on
-        ablation arms. A hard failure of an active signal marks the trajectory
-        invalid so it is excluded from the reflective dataset."""
+        ablation arms.
+
+        API/judge failures of an active signal mark valid=False (excluded from
+        reflection) and DROP that term from the score returned to GEPA
+        (renormalize over succeeded signals). Compile-to-PersonaProfile failure
+        is prompt-attributable: tau=0 with a critique, kept in score + reflection.
+        """
         shift_vector = data_inst.shift_vector
         valid = True
         raw_pvq_val = 0.0
@@ -830,37 +869,52 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
             # sim on hopeless candidates (the gate is going to crush the score anyway).
             grounding = self._grounding_score(generated_persona, data_inst.posts)
 
+            # terms: (weight, score) for signals that count toward the GEPA score.
+            # API-failed signals are omitted here (and set valid=False); compile
+            # failures enter as score 0 so the prompt is penalized and reflected on.
+            terms: list[tuple[float, float]] = []
+
             if W_ALIGN > 0:
                 alignment_grade, raw_pvq_val, agent_vector = self._score_schwartz_alignment(
                     generated_persona, shift_vector
                 )
                 if alignment_grade is None:
-                    valid = False
+                    valid = False  # PVQ API/parse failure — drop term, exclude reflection
                     alignment_grade = 0.0
+                else:
+                    terms.append((W_ALIGN, alignment_grade))
             else:
                 alignment_grade, raw_pvq_val, agent_vector = 0.0, 0.0, None
 
-            utility = (
-                self._utility_score(generated_persona, data_inst)
-                if W_UTILITY > 0 else 0.0
-            )
+            if W_UTILITY > 0:
+                utility = self._utility_score(generated_persona, data_inst)
+                terms.append((W_UTILITY, utility))
+            else:
+                utility = 0.0
 
+            tau_result = None
+            normalized_tau = 0.0
             if W_TAU > 0 and grounding >= GROUNDING_SKIP:
                 tau_result = self._score_persona_with_tau(generated_persona, data_inst.user_id)
-            else:
-                tau_result = None  # inactive arm or early-exit on low grounding
-            if tau_result is None and W_TAU > 0 and grounding >= GROUNDING_SKIP:
-                valid = False  # active tau signal genuinely failed (not an early-exit skip)
-            normalized_tau = (float(tau_result["score"]) / 5.0) if tau_result else 0.0
+                if tau_result is None:
+                    valid = False  # sim/judge API failure — drop term, exclude reflection
+                else:
+                    normalized_tau = float(tau_result["score"]) / 5.0
+                    terms.append((W_TAU, normalized_tau))  # includes compile-fail at 0
+            elif W_TAU > 0:
+                # Deliberate low-grounding skip: count tau as 0 (don't renormalize away).
+                terms.append((W_TAU, 0.0))
 
-            base = (W_ALIGN * alignment_grade
-                    + W_TAU * normalized_tau
-                    + W_UTILITY * utility)
+            if terms:
+                w_sum = sum(w for w, _ in terms)
+                base = sum(w * s for w, s in terms) / w_sum
+            else:
+                base = 0.0
             score = base * grounding if USE_GROUNDING_GATE else base
 
             print(f"[{data_inst.user_id}] align={alignment_grade:.2f} "
                   f"tau={normalized_tau:.2f} util={utility:.2f} ground={grounding:.2f} "
-                  f"score={score:.2f} valid={valid}")
+                  f"score={score:.2f} valid={valid} terms={[(w, round(s, 2)) for w, s in terms]}")
 
         except Exception as e:
             print(f"Error generating persona for {data_inst.user_id}: {e}")
@@ -926,8 +980,9 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         if "persona_prompt" not in components_to_update:
             return datasets
 
-        # Exclude invalid trajectories (an active signal hard-failed) so the
-        # proposer never diagnoses API noise as a prompt weakness.
+        # Exclude invalid trajectories (active-signal API failure) so the
+        # proposer never diagnoses transient noise as a prompt weakness.
+        # Compile-to-schema failures stay valid and carry a tau critique.
         trajectories = [t for t in (eval_batch.trajectories or []) if getattr(t, "valid", True)]
         records: list[dict[str, Any]] = []
 

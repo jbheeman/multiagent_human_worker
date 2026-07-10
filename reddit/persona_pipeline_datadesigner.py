@@ -180,6 +180,9 @@ a lens for priorities and reactions, never as a source of content):
   Do not print numbers, percentages, or vector language. Express priorities only through
   behavior, reactions, and what the person argues for. Before finishing, scan every sentence
   for banned words and rewrite if found.
+
+EXTERNAL CONTENT THIS USER QUOTED OR ENGAGED WITH (selection + stance; secondary signal):
+{{ quote_signals }}
 """
 
 GEPA_PARAGRAPH_PROMPT = """\
