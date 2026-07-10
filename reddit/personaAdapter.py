@@ -142,7 +142,7 @@ http_client = httpx.Client(verify=False)
 
 #This model generates the persona description
 persona_model = OpenAIServerModel(
-        model_id="kimi",
+        model_id="gpt-oss",
         api_base="https://ellm.nrp-nautilus.io/v1",
         api_key=os.getenv("NAUT_API_KEY"),
         client_kwargs={"http_client": http_client}
@@ -150,7 +150,7 @@ persona_model = OpenAIServerModel(
 
 #This model evaluates the persona description
 teacher_model_raw= OpenAIServerModel( # Still used for persona agent
-        model_id="qwen3",
+        model_id="gpt-oss",
         api_base="https://ellm.nrp-nautilus.io/v1",
         api_key=os.getenv("NAUT_API_KEY"),
         client_kwargs={"http_client": http_client}
