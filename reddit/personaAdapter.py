@@ -31,9 +31,9 @@ from persona_pipeline_datadesigner import PersonaProfile, persona_to_yaml
 # ---------------------------------------------------------------------------
 # Rework configuration (AAAI). GEPA_ARM is the ablation ladder: it selects the
 # signal weights AND the reflection objective, so a single env var switches
-# between the value_only / behavior_only / full arms. All signals are always
-# computed (for per-signal trajectories); inactive ones are zero-weighted in the
-# score and omitted from the reflective feedback.
+# between the value_only / behavior_only / full arms. Inactive signals are skipped
+# (no tau sim / utility / PVQ when their weight is 0); active ones enter the score
+# and reflective feedback.
 # ---------------------------------------------------------------------------
 ARM = os.getenv("GEPA_ARM", "full")
 ARM_CONFIG = {
@@ -142,6 +142,7 @@ http_client = httpx.Client(verify=False)
 
 #This model generates the persona description
 persona_model = OpenAIServerModel(
+        model_id="gpt-oss",
         model_id="gpt-oss",
         api_base="https://ellm.nrp-nautilus.io/v1",
         api_key=os.getenv("NAUT_API_KEY"),
@@ -809,10 +810,10 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         
     
     def _evaluate_one(self, data_inst: PersonaDataInst, prompt_template: str) -> PersonaTrajectory:
-        """Score a single instance. Computes ALL signals (even inactive ones, for
-        per-signal trajectories); only the ARM weights decide what enters the score.
-        A hard failure of an ACTIVE signal marks the trajectory invalid so it is
-        excluded from the reflective dataset rather than learned from as noise."""
+        """Score a single instance. Only ACTIVE signals (weight > 0) are computed;
+        inactive ones are skipped to avoid paying for tau sims / utility / PVQ on
+        ablation arms. A hard failure of an active signal marks the trajectory
+        invalid so it is excluded from the reflective dataset."""
         shift_vector = data_inst.shift_vector
         valid = True
         raw_pvq_val = 0.0
@@ -829,18 +830,25 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
             # sim on hopeless candidates (the gate is going to crush the score anyway).
             grounding = self._grounding_score(generated_persona, data_inst.posts)
 
-            alignment_grade, raw_pvq_val, agent_vector = self._score_schwartz_alignment(generated_persona, shift_vector)
-            if alignment_grade is None:
-                if W_ALIGN > 0:
+            if W_ALIGN > 0:
+                alignment_grade, raw_pvq_val, agent_vector = self._score_schwartz_alignment(
+                    generated_persona, shift_vector
+                )
+                if alignment_grade is None:
                     valid = False
-                alignment_grade = 0.0
-
-            utility = self._utility_score(generated_persona, data_inst)
-
-            if grounding < GROUNDING_SKIP:
-                tau_result = None  # early-exit: don't pay for the sim on a doomed candidate
+                    alignment_grade = 0.0
             else:
+                alignment_grade, raw_pvq_val, agent_vector = 0.0, 0.0, None
+
+            utility = (
+                self._utility_score(generated_persona, data_inst)
+                if W_UTILITY > 0 else 0.0
+            )
+
+            if W_TAU > 0 and grounding >= GROUNDING_SKIP:
                 tau_result = self._score_persona_with_tau(generated_persona, data_inst.user_id)
+            else:
+                tau_result = None  # inactive arm or early-exit on low grounding
             if tau_result is None and W_TAU > 0 and grounding >= GROUNDING_SKIP:
                 valid = False  # active tau signal genuinely failed (not an early-exit skip)
             normalized_tau = (float(tau_result["score"]) / 5.0) if tau_result else 0.0

@@ -129,6 +129,59 @@ EXTERNAL CONTENT THIS USER QUOTED OR ENGAGED WITH (selection + stance; secondary
 {{ quote_signals }}
 """
 
+
+
+GEPA_VALUE_ONLY_PROMPT = """\
+You are an expert psychological profiler. From the user's behavioral corpus, write a
+self-explanatory first-person portrait — psychologically vivid in its behavioral precision
+and tonal authenticity, enabling a simulator to reproduce how this person communicates,
+argues, and reacts under pressure.
+
+Do not write rigid rules. Write the psychological reasoning and behavioral drivers.
+Do not write dialogues, transcripts, or invented transactional details.
+
+USER CORPUS (speaker-attributed; [USER]/[INTERLOCUTOR]/[QUOTED] turns under [r/subreddit] headers):
+{{ user_corpus }}
+
+CORPUS INSTRUCTIONS:
+- STRICT GROUNDING PROTOCOL: The portrait must be a behavioral synthesis of {{ user_corpus }}
+  ONLY. Every topic, skill, reference, relationship, and biographical detail in the portrait
+  must be traceable to the user's actual turns. If the user discusses a game, the portrait
+  may reference that game, but must not invent specific mechanics, items, ranks, or lore
+  absent from the corpus. If the user discusses a law, the portrait may reference that law,
+  but must not invent specific clauses, cases, or statutes not cited in the corpus.
+- NO HALLUCINATION: Never fill gaps in the corpus with plausible fiction. If the corpus does
+  not reveal a hobby, profession, or preference, the portrait must not supply one. A partial
+  portrait grounded in evidence is superior to a complete portrait built on invention.
+- INTERLOCUTOR and QUOTED turns are context for how this user argues and reacts; never
+  attribute quoted views, beliefs, or biography to the portrait.
+- Transfer how they write and argue, not their Reddit topics or subculture jargon as identity.
+- REGISTER IS NON-NEGOTIABLE: match the source's actual vocabulary level, sentence length,
+  and formatting. Do not upgrade their diction, smooth their syntax, or wrap the portrait in
+  essay structure unless the user actually writes that way. Sanding a hostile or crude user
+  into an articulate, agreeable, or academic-sounding one is a FAILURE.
+
+LATENT VALUE PROFILE (ground the portrait's behavioral drivers in this vector; treat it as
+a lens for priorities and reactions, never as a source of content):
+{{ schwartz_json }}
+
+- BEHAVIORAL MAPPING ONLY: Use {{ schwartz_json }} exclusively to modulate the persona's
+  priorities, emotional triggers, argumentation style, risk tolerance, and what they notice
+  or value. The vector explains the "how" and "why" of behavior, never the "what".
+- VALUES DO NOT GENERATE CONTENT: High scores in dimensions like ACHIEVEMENT, STIMULATION,
+  or SECURITY must not authorize the addition of new topics, skills, or facts. For example,
+  high ACHIEVEMENT must manifest as a drive for mastery or progress expressed through the
+  topics already present in the corpus, not by inventing gaming stats or career goals.
+  High SECURITY must manifest as a preference for stability or risk-aversion applied to the
+  corpus subjects, not by inventing legal frameworks or safety protocols.
+- VALUE-NAME LEAK IS A FAILURE: Never write the literal Schwartz dimension names or close
+  derivatives -- in any form -- including: power, achievement, hedonism/hedonistic,
+  stimulation, self-direction, universalism, benevolence, tradition, conformity, security.
+  Do not print numbers, percentages, or vector language. Express priorities only through
+  behavior, reactions, and what the person argues for. Before finishing, scan every sentence
+  for banned words and rewrite if found.
+"""
+
 GEPA_PARAGRAPH_PROMPT = """\
 You are an expert psychological profiler. From the user's behavioral corpus, write a
 self-explanatory first-person portrait — psychologically vivid enough that someone
@@ -245,13 +298,13 @@ def make_model_configs():
         ),
         ModelConfig(
             alias=CRITIC_ALIAS,
-            model=os.getenv("CRITIC_MODEL", "kimi"),
+            model=os.getenv("CRITIC_MODEL", "minimax-m2"),
             provider=PROVIDER_NAME,
             inference_parameters=ChatCompletionInferenceParams(max_parallel_requests=critic_parallel),
         ),
         ModelConfig(
             alias=CRITIC_FAST_ALIAS,
-            model=os.getenv("CRITIC_FAST_MODEL", "kimi"),
+            model=os.getenv("CRITIC_FAST_MODEL", "minimax-m2"),
             provider=PROVIDER_NAME,
             inference_parameters=ChatCompletionInferenceParams(max_parallel_requests=critic_fast_parallel),
         ),
@@ -281,7 +334,7 @@ class Arm(str, Enum):
 ARM_PROMPTS = {
     Arm.GEPA_FULL: OPTIMIZED_GEPA_FULL_PROMPT,
     Arm.GEPA_UNOPT: GEPA_PARAGRAPH_PROMPT,
-    Arm.GEPA_VALUE_ONLY: GEPA_PARAGRAPH_PROMPT,
+    Arm.GEPA_VALUE_ONLY: GEPA_VALUE_ONLY_PROMPT,
     Arm.GEPA_BEHAVIOR_ONLY: GEPA_PARAGRAPH_PROMPT,
     Arm.REDDIT_NO_PSYCH: REDDIT_NO_PSYCH_PARAGRAPH_PROMPT,
 }
