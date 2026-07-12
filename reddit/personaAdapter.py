@@ -58,9 +58,22 @@ SIMILARITY_METRIC = os.getenv("SIMILARITY_METRIC", "cosine")  # "cosine" | "spea
 # Wall-clock / scoring knobs.
 EVAL_WORKERS = int(os.getenv("EVAL_WORKERS", "8"))       # ThreadPoolExecutor width in evaluate()
 GROUNDING_SKIP = float(os.getenv("GROUNDING_SKIP", "0.25"))  # skip tau sim below this grounding
+# Piecewise gate: g >= FULL → multiplier 1.0 (kill noise in the clean band);
+# SKIP <= g < FULL → g/FULL; g < SKIP → tau early-exit + still g/FULL crush.
+GROUNDING_FULL = float(os.getenv("GROUNDING_FULL", "0.7"))
 UTILITY_K = int(os.getenv("UTILITY_K", "9"))            # distractors in the utility ranking
-UTILITY_SMOOTH = bool(int(os.getenv("UTILITY_SMOOTH", "0")))  # smooth margin vs. rank fraction
-TAU_JUDGE_SAMPLES = int(os.getenv("TAU_JUDGE_SAMPLES", "1"))  # median-of-N judge samples
+UTILITY_SMOOTH = bool(int(os.getenv("UTILITY_SMOOTH", "1")))  # sigmoid margin (continuous); 0 = rank lumps
+# Tau continuous score = (1-BLEND)*(verified/n) + BLEND*(anchor/5). Judge is temp-0
+# so multi-sample medians are identical — single call only.
+TAU_ANCHOR_BLEND = float(os.getenv("TAU_ANCHOR_BLEND", "0.5"))
+TAU_JUDGE_SAMPLES = int(os.getenv("TAU_JUDGE_SAMPLES", "1"))  # unused (temp-0); kept for env compat
+# Paired evaluation: fixed stratified panel reused for every candidate, k persona
+# samples averaged per (candidate, user). GEPA's subsample gate then compares the
+# same users; optional sign-test rejects challengers that don't win a majority of
+# per-user deltas (stricter than sum-of-deltas).
+EVAL_PANEL_N = int(os.getenv("EVAL_PANEL_N", "5"))
+PERSONA_SAMPLES_K = int(os.getenv("PERSONA_SAMPLES_K", "2"))
+PAIRED_SIGN_TEST = bool(int(os.getenv("PAIRED_SIGN_TEST", "1")))
 
 # Per-arm persistence dir (created in __main__).
 RUN_DIR = os.path.join("gepa_runs", ARM)
@@ -79,6 +92,19 @@ RETRYABLE_ERRORS = (
     TimeoutError,
     ConnectionError,
 )
+
+
+def grounding_multiplier(g: float) -> float:
+    """Anti-hallucination gate as a piecewise multiplier, not a continuous objective.
+
+    g >= GROUNDING_FULL (0.7) → 1.0  (clean band: no differential rescaling)
+    g <  GROUNDING_FULL       → g/FULL (ramp; g < SKIP also early-exits tau)
+    """
+    if not USE_GROUNDING_GATE:
+        return 1.0
+    if g >= GROUNDING_FULL:
+        return 1.0
+    return g / GROUNDING_FULL
 
 
 def retry_with_backoff(max_retries=3, initial_delay=2.0, max_delay=60.0, backoff_factor=2.0):
@@ -202,7 +228,7 @@ class PersonaTrajectory:
     tau_result: dict | None = None  # Stores {'score': 4, 'critique': '...'}
     grounding_score: float = 1.0  # anti-hallucination gate (persona vs posts)
     utility_score: float = 0.0    # held-out behavioral prediction
-    combined_score: float = 0.0  # weighted: value alignment + tau + utility, gated by grounding
+    combined_score: float = 0.0  # weighted align+tau+utility, piecewise-gated by grounding
     valid: bool = True           # False if an ACTIVE signal API-failed => excluded from reflection
                                  # (compile defects stay valid so GEPA can learn from them)
 
@@ -392,6 +418,13 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         # Per-arm run dir for persistence; set in __main__.
         self._run_dir: str | None = None
         self._log_lock = threading.Lock()
+        # Paired acceptance: scores from the last capture_traces=True panel eval
+        # (incumbent). The next same-user capture_traces=False eval is the
+        # challenger; optional sign-test gate forces rejection if it doesn't win
+        # a majority of per-user deltas. Cleared after the challenger eval so
+        # full-valset scoring is unaffected.
+        self._incumbent_panel_scores: dict[str, float] | None = None
+        self._incumbent_panel_ids: list[str] | None = None
 
     # ---- Distractor pool for utility ranking -----------------------------
     def build_distractor_index(self, splits: dict[str, list["PersonaDataInst"]]):
@@ -574,20 +607,87 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         return grade, mean_pvq, pvq_results
     
     def _call_tau_judge(self, formatted_prompt: str) -> dict | None:
-        """Single deterministic judge call. Retries once on any failure; returns a
-        parsed {'score','critique'} dict or None (never a fabricated 0/1 score)."""
+        """Single deterministic (temp-0) judge call. Retries once on failure.
+
+        Expects JSON with per-prediction verdicts + optional 1-5 anchor. Returns a
+        dict with continuous `score` in [0, 5] = 5 * blend(verified/n, anchor/5),
+        plus critique / verified_frac for reflection — or None on hard failure.
+        """
         for attempt in range(2):
             try:
                 raw_response = teacher_model(formatted_prompt, temperature=0)
                 match = re.search(r'\{.*\}', raw_response, re.DOTALL)
-                if match:
-                    data = json.loads(match.group(0))
-                    if "score" in data:
-                        return {"score": int(data["score"]), "critique": data.get("critique", "")}
-                print(f"Tau judge attempt {attempt + 1}: no parseable score.")
+                if not match:
+                    print(f"Tau judge attempt {attempt + 1}: no parseable JSON.")
+                    continue
+                data = json.loads(match.group(0))
+                parsed = self._tau_score_from_judge_json(data)
+                if parsed is not None:
+                    return parsed
+                print(f"Tau judge attempt {attempt + 1}: missing predictions/anchor.")
             except Exception as e:
                 print(f"Tau judge attempt {attempt + 1} failed: {e}")
         return None
+
+    @staticmethod
+    def _tau_score_from_judge_json(data: dict) -> dict | None:
+        """Map structured judge JSON → continuous tau score in [0, 5].
+
+        Primary granularity: verified/total over per-prediction verdicts
+        (confirmed=1, partial=0.5, else 0). Optionally blend with the 1-5 anchor
+        so the ordinal scale still regularizes wild verification counts.
+        """
+        preds = data.get("predictions")
+        anchor_raw = data.get("anchor_score", data.get("score"))
+        critique = data.get("critique", "")
+
+        frac = None
+        if isinstance(preds, list) and preds:
+            verified = 0.0
+            for p in preds:
+                if not isinstance(p, dict):
+                    continue
+                verdict = str(p.get("verdict", p.get("status", ""))).lower()
+                if verdict in ("confirmed", "confirm", "yes", "true"):
+                    verified += 1.0
+                elif verdict in ("partial", "partially", "weak"):
+                    verified += 0.5
+            frac = verified / len(preds)
+
+        anchor_01 = None
+        if anchor_raw is not None:
+            try:
+                anchor_01 = max(0.0, min(5.0, float(anchor_raw))) / 5.0
+            except (TypeError, ValueError):
+                anchor_01 = None
+
+        if frac is None and anchor_01 is None:
+            return None
+        if frac is None:
+            score_01 = anchor_01
+        elif anchor_01 is None:
+            score_01 = frac
+        else:
+            b = max(0.0, min(1.0, TAU_ANCHOR_BLEND))
+            score_01 = (1.0 - b) * frac + b * anchor_01
+
+        if not critique and isinstance(preds, list):
+            bits = []
+            for i, p in enumerate(preds, 1):
+                if not isinstance(p, dict):
+                    continue
+                bits.append(
+                    f"P{i} {p.get('prediction', '?')!r} -> {p.get('verdict', p.get('status', '?'))}"
+                    f" ({p.get('cite', 'no cite')})"
+                )
+            critique = "; ".join(bits)
+
+        return {
+            "score": float(score_01) * 5.0,  # keep /5.0 normalization downstream
+            "critique": critique or "",
+            "verified_frac": frac,
+            "anchor_score": (anchor_01 * 5.0) if anchor_01 is not None else None,
+        }
 
     def _compile_persona_to_yaml(self, paragraph: str, user_id: str) -> str | None:
         """Mirror the production pipeline: paragraph -> structured PersonaProfile ->
@@ -614,7 +714,9 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
 
     def _score_persona_with_tau(self, persona_description: str, user_id: str = "") -> dict | None:
         """
-        Runs Tau Bench and returns a dict with 'score' (1-5) and 'critique'.
+        Runs Tau Bench and returns a dict with continuous `score` in [0, 5]
+        (primarily verified/total of structured predictions, blended with a 1-5
+        anchor) and `critique`.
 
         Failure modes (caller must treat differently):
           * Compile failure → {'score': 0, 'critique': 'failed to compile...'}.
@@ -630,7 +732,7 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         if not user_id:
             raise ValueError("user_id is required for deterministic tau task assignment")
         if MOCK_LLM:
-            return {"score": 3, "critique": "mock tau result"}
+            return {"score": 3.0, "critique": "mock tau result", "verified_frac": 0.6, "anchor_score": 3.0}
 
         # 1. Compile to the YAML spec the real sims consume, then run the sim.
         #    Task is hash(user_id) over the mock pool — same user always gets the
@@ -661,9 +763,9 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
 
         # 2. Behavioral judge (P3): reward observable interaction quality, NOT the
         #    persona naming its own psychological values in the monologue. The judge
-        #    first extracts concrete behavioral predictions from the persona, then
-        #    verifies each against the transcript with a cited line, THEN scores —
-        #    anchoring the 1-5 scale and making the critique a useful GEPA signal.
+        #    extracts concrete behavioral predictions and verifies each against the
+        #    transcript; the GEPA score is primarily verified/total (continuous),
+        #    blended with a 1-5 anchor so the ordinal scale still regularizes.
         TAU_ALIGNMENT_JUDGE_PROMPT = """
         You are an expert Evaluator of simulated customer-support interactions.
 
@@ -682,19 +784,15 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
            "uses short, profane, impatient sentences").
         2. For each prediction, find whether the TRANSCRIPT confirms or violates it,
            quoting the specific line that shows it (or noting "no evidence").
-        3. Only then assign the overall score, justified by those per-prediction checks.
+        3. Only then assign an overall anchor_score (1-5), justified by those checks.
 
-        ### SCORING CRITERIA (1-5)
-        - **5 (Perfect):** Actions and tone consistently and specifically reflect the
-          persona's priorities throughout; every prediction confirmed.
-        - **4 (Strong):** Most predictions confirmed; at most one weakly supported or
-          slightly off, none contradicted.
-        - **3 (Passable):** Behavior broadly plausible but generic or only partially
-          consistent; a mix of confirmed and unsupported predictions.
-        - **2 (Weak):** Mostly generic or off-persona; at most one prediction confirmed,
-          or the register is noticeably wrong.
-        - **1 (Fail):** The user acts randomly, breaks character, or behaves in a way
-          that contradicts the persona's priorities.
+        ### ANCHOR SCALE (1-5) — for anchor_score only
+        - **5 (Perfect):** Every prediction confirmed.
+        - **4 (Strong):** Most predictions confirmed; at most one weakly supported;
+          none contradicted.
+        - **3 (Passable):** Mix of confirmed and unsupported; broadly plausible.
+        - **2 (Weak):** At most one prediction confirmed, or wrong register.
+        - **1 (Fail):** Random, breaks character, or contradicts the persona.
 
         ### INPUT DATA
         **PERSONA:**
@@ -704,16 +802,23 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         {clean_transcript}
 
         ### OUTPUT FORMAT
-        You must return a valid JSON object with two fields:
-        1. "score": An integer from 1 to 5.
-        2. "critique": The per-prediction checks (prediction -> confirmed/violated +
-           cited line) followed by a one-line justification of the score. Use this to
-           guide future improvements.
+        Return a valid JSON object with:
+        1. "predictions": array of 3-4 objects, each with:
+           - "prediction": the checkable claim
+           - "verdict": one of "confirmed" | "partial" | "violated" | "no_evidence"
+           - "cite": quoted transcript line, or "no evidence"
+        2. "anchor_score": integer 1-5 from the scale above
+        3. "critique": brief justification tying verdicts to the anchor
 
         Example:
         {{
-            "score": 4,
-            "critique": "P1 'refuses to share data' -> confirmed ('I'm not giving you my zip'); P2 'escalates quickly' -> confirmed (demanded a manager turn 3); P3 'blunt/profane register' -> partial (curt but not profane). Behavior matches a privacy-guarding, low-trust persona; conceded slightly early."
+            "predictions": [
+                {{"prediction": "refuses to share personal data", "verdict": "confirmed", "cite": "I'm not giving you my zip"}},
+                {{"prediction": "escalates quickly", "verdict": "confirmed", "cite": "demanded a manager turn 3"}},
+                {{"prediction": "blunt/profane register", "verdict": "partial", "cite": "curt but not profane"}}
+            ],
+            "anchor_score": 4,
+            "critique": "2 confirmed + 1 partial; privacy-guarding low-trust persona, conceded slightly early."
         }}
         """
 
@@ -723,19 +828,8 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
             clean_transcript=clean_transcript,
         )
 
-        # 3. Deterministic judging: single sample at temp 0, or median-of-N to beat
-        #    residual sampling noise in the "bottom failures" the reflection reads.
-        samples = []
-        critique = None
-        for _ in range(max(1, TAU_JUDGE_SAMPLES)):
-            parsed = self._call_tau_judge(formatted_prompt)
-            if parsed is not None:
-                samples.append(parsed["score"])
-                critique = parsed["critique"] or critique
-        if not samples:
-            return None  # judge API/parse failure — exclude + renormalize
-        median_score = sorted(samples)[len(samples) // 2]
-        return {"score": median_score, "critique": critique or ""}
+        # Single temp-0 call (N>1 is identical under greedy decoding).
+        return self._call_tau_judge(formatted_prompt)
 
 
     def _grounding_score(self, persona_text: str, posts: list[str]) -> float:
@@ -790,12 +884,11 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
             return 0.5
 
     def _utility_score(self, persona_text: str, data_inst: "PersonaDataInst") -> float:
-        """Held-out behavioral prediction as a RANKING task in [0,1]: prompt the
-        persona (in character) to write its next post, then check whether that
-        prediction sits closer to the user's TRUE held-out post than to K real
-        distractor posts by other users. This restores dynamic range (raw cosine
-        between two Reddit posts is compressed ~0.2-0.5) and answers the circularity
-        charge — utility becomes retrieval against real data, not a similarity vibe."""
+        """Held-out behavioral prediction in [0,1]: persona writes a next post;
+        compare embedding similarity to the TRUE held-out post vs K real distractors.
+
+        Default (UTILITY_SMOOTH=1): continuous sigmoid of (cos_true - mean_cos_dist).
+        UTILITY_SMOOTH=0: discrete rank fraction with 1/K lumps."""
         if MOCK_LLM or eval_model is None:
             return 0.5
         true_post = data_inst.heldout_post
@@ -865,8 +958,8 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                 return persona_model([{"role": "user", "content": prompt}]).content or ""
             generated_persona = call_persona_model()
 
-            # Grounding first: it gates the score AND lets us skip the expensive tau
-            # sim on hopeless candidates (the gate is going to crush the score anyway).
+            # Grounding first: piecewise gate on the final score, and early-exit
+            # the expensive tau sim when g < GROUNDING_SKIP (hopeless / hallucinated).
             grounding = self._grounding_score(generated_persona, data_inst.posts)
 
             # terms: (weight, score) for signals that count toward the GEPA score.
@@ -910,11 +1003,13 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                 base = sum(w * s for w, s in terms) / w_sum
             else:
                 base = 0.0
-            score = base * grounding if USE_GROUNDING_GATE else base
+            g_mult = grounding_multiplier(grounding)
+            score = base * g_mult
 
             print(f"[{data_inst.user_id}] align={alignment_grade:.2f} "
                   f"tau={normalized_tau:.2f} util={utility:.2f} ground={grounding:.2f} "
-                  f"score={score:.2f} valid={valid} terms={[(w, round(s, 2)) for w, s in terms]}")
+                  f"g_mult={g_mult:.2f} score={score:.2f} valid={valid} "
+                  f"terms={[(w, round(s, 2)) for w, s in terms]}")
 
         except Exception as e:
             print(f"Error generating persona for {data_inst.user_id}: {e}")
@@ -950,6 +1045,41 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
             valid=valid,
         )
 
+    def _evaluate_one_k(self, data_inst: PersonaDataInst, prompt_template: str) -> PersonaTrajectory:
+        """k persona generations per (candidate, user); return traj with averaged score.
+
+        Persona gen is the remaining stochastic source (sim/judge/agent are temp-0).
+        Averaging k samples cuts that σ by √k. Reflection uses the sample whose
+        score is closest to the mean so the critique still matches a real persona.
+        """
+        k = max(1, PERSONA_SAMPLES_K)
+        if k == 1:
+            return self._evaluate_one(data_inst, prompt_template)
+
+        samples = [self._evaluate_one(data_inst, prompt_template) for _ in range(k)]
+        valid_samples = [t for t in samples if t.valid]
+        pool = valid_samples or samples
+        mean_score = sum(t.combined_score for t in pool) / len(pool)
+        chosen = min(pool, key=lambda t: abs(t.combined_score - mean_score))
+        # Stamp averaged signal onto the chosen traj (GEPA reads combined_score).
+        chosen.combined_score = mean_score
+        chosen.schwartz_alignment_score = sum(t.schwartz_alignment_score for t in pool) / len(pool)
+        chosen.utility_score = sum(t.utility_score for t in pool) / len(pool)
+        chosen.grounding_score = sum(t.grounding_score for t in pool) / len(pool)
+        chosen.valid = bool(valid_samples)  # invalid only if every sample API-failed
+        # Average tau if present
+        tau_scores = [
+            float(t.tau_result["score"]) for t in pool
+            if t.tau_result and "score" in t.tau_result
+        ]
+        if tau_scores and chosen.tau_result is not None:
+            chosen.tau_result = dict(chosen.tau_result)
+            chosen.tau_result["score"] = sum(tau_scores) / len(tau_scores)
+            chosen.tau_result["k_samples"] = k
+        print(f"[{data_inst.user_id}] k={k} scores={[round(t.combined_score, 3) for t in samples]} "
+              f"mean={mean_score:.3f} valid={chosen.valid}")
+        return chosen
+
     def evaluate(
         self,
         batch: list[PersonaDataInst],
@@ -961,10 +1091,44 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
         # All per-instance work is I/O-bound API traffic -> parallelize. Order is
         # preserved by mapping over the batch and keeping results in index order.
         with ThreadPoolExecutor(max_workers=max(1, EVAL_WORKERS)) as ex:
-            trajs = list(ex.map(lambda d: self._evaluate_one(d, prompt_template), batch))
+            trajs = list(ex.map(lambda d: self._evaluate_one_k(d, prompt_template), batch))
 
         outputs = [t.generated_persona for t in trajs]
         scores = [t.combined_score for t in trajs]
+        user_ids = [t.user_id for t in trajs]
+
+        # Paired sign-test gate vs incumbent (same panel, challenger eval).
+        if capture_traces:
+            self._incumbent_panel_scores = dict(zip(user_ids, scores))
+            self._incumbent_panel_ids = list(user_ids)
+        elif (
+            PAIRED_SIGN_TEST
+            and self._incumbent_panel_scores is not None
+            and self._incumbent_panel_ids == user_ids
+        ):
+            deltas = [
+                scores[i] - self._incumbent_panel_scores[user_ids[i]]
+                for i in range(len(user_ids))
+            ]
+            n_pos = sum(1 for d in deltas if d > 1e-9)
+            n_neg = sum(1 for d in deltas if d < -1e-9)
+            n_tie = len(deltas) - n_pos - n_neg
+            mean_delta = sum(deltas) / len(deltas) if deltas else 0.0
+            # Accept only if a strict majority of non-tie users improve.
+            decided = n_pos + n_neg
+            passes = decided > 0 and n_pos > n_neg and n_pos > decided / 2.0
+            print(f"Paired sign-test: n={len(deltas)} +={n_pos} -={n_neg} tie={n_tie} "
+                  f"mean_Δ={mean_delta:+.4f} pass={passes}")
+            if not passes:
+                # Force GEPA's sum(new) < sum(old) rejection without inventing wins.
+                scores = [
+                    self._incumbent_panel_scores[uid] - 1e-6 for uid in user_ids
+                ]
+                for t, s in zip(trajs, scores):
+                    t.combined_score = s
+            self._incumbent_panel_scores = None
+            self._incumbent_panel_ids = None
+
         trajectories = trajs if capture_traces else None
         return EvaluationBatch(outputs=outputs, scores=scores, trajectories=trajectories)
 
@@ -1005,7 +1169,7 @@ class PersonaGEPAAdapter(GEPAAdapter[PersonaDataInst, PersonaTrajectory, str]):
                 parts.append(f"Value alignment: {traj.schwartz_alignment_score:.2f}")
             if W_TAU > 0:
                 tau_score = traj.tau_result.get("score", 0) if traj.tau_result else 0
-                parts.append(f"Tau: {tau_score}/5")
+                parts.append(f"Tau: {tau_score:.2f}/5")
             if W_UTILITY > 0:
                 parts.append(f"Utility: {traj.utility_score:.2f}")
             parts.append(f"Grounding: {traj.grounding_score:.2f}")
@@ -1170,27 +1334,42 @@ def _stratified_sample(insts: list[PersonaDataInst], n: int, rng: random.Random)
     return out
 
 
+class FixedPanelBatchSampler:
+    """Always return the full loader — the fixed evaluation panel.
+
+    Used so every reflective propose step evaluates the SAME users (paired
+    incumbent vs challenger), not a reshuffled size-3 minibatch.
+    """
+
+    def next_minibatch_ids(self, loader, state):
+        ids = list(loader.all_ids())
+        if not ids:
+            raise ValueError("FixedPanelBatchSampler: empty evaluation panel")
+        return ids
+
+
 if __name__ == "__main__":
     base_candidate = {"persona_prompt": GEPA_PARAGRAPH_PROMPT}
 
-    TRAIN_N = int(os.getenv("TRAIN_N", "40"))
-    VAL_N = int(os.getenv("VAL_N", "20"))
     MAX_METRIC_CALLS = int(os.getenv("MAX_METRIC_CALLS", "350"))
 
     TRAIN_FILE = os.getenv("TRAIN_FILE", "selected_users_pvq_gepa_train_k50.jsonl")
-    # NOTE: the valset is what GEPA SELECTS on (Pareto front) -> it is contaminated
-    # and is NOT a test set. The clean N=100 eval split (selected_users_pvq_eval_k100.jsonl)
-    # is untouched here and reserved for E1/E2.
+    # Distractor pool still draws from train+val files; the GEPA selection panel
+    # is a fixed stratified subset (not a clean test set). Clean E1/E2 eval stays
+    # on selected_users_pvq_eval_k100.jsonl.
     VAL_FILE = os.getenv("VAL_FILE", "selected_users_pvq_gepa_test_k25.jsonl")
 
     trainset_full = load_persona_dataset(TRAIN_FILE)
     valset_full = load_persona_dataset(VAL_FILE)
 
-    # Decoupled RNGs so changing TRAIN_N never perturbs the validation sample.
-    train_rng = random.Random(42)
-    val_rng = random.Random(43)
-    trainset = _stratified_sample(trainset_full, min(TRAIN_N, len(trainset_full)), train_rng)
-    valset = val_rng.sample(valset_full, min(VAL_N, len(valset_full)))
+    # Fixed paired panel: same users for every candidate (train reflection subsample
+    # AND val Pareto). Stratified by dominant Schwartz value.
+    panel_rng = random.Random(42)
+    panel = _stratified_sample(
+        trainset_full, min(EVAL_PANEL_N, len(trainset_full)), panel_rng
+    )
+    trainset = panel
+    valset = panel
 
     adapter = PersonaGEPAAdapter()
     # Utility distractors come from the FULL splits (more real candidates), drawn
@@ -1203,14 +1382,23 @@ if __name__ == "__main__":
     with open(os.path.join(RUN_DIR, "config.json"), "w") as f:
         json.dump({
             "arm": ARM, "weights": ARM_CONFIG, "seed": 42,
-            "train_n": len(trainset), "val_n": len(valset),
+            "eval_panel_n": len(panel),
+            "persona_samples_k": PERSONA_SAMPLES_K,
+            "paired_sign_test": PAIRED_SIGN_TEST,
+            "utility_smooth": UTILITY_SMOOTH,
+            "grounding_full": GROUNDING_FULL,
+            "grounding_skip": GROUNDING_SKIP,
             "max_metric_calls": MAX_METRIC_CALLS,
             "train_file": TRAIN_FILE, "val_file": VAL_FILE,
+            "panel_user_ids": [d.user_id for d in panel],
         }, f, indent=2)
     with open(os.path.join(RUN_DIR, "seed_prompt.txt"), "w") as f:
         f.write(GEPA_PARAGRAPH_PROMPT)
 
     adapter.propose_new_texts = custom_proposal_function
+
+    print(f"Paired panel: n={len(panel)} k={PERSONA_SAMPLES_K} "
+          f"sign_test={PAIRED_SIGN_TEST} users={[d.user_id for d in panel]}")
 
     gepa_result = gepa.optimize(
         seed_candidate=base_candidate,
@@ -1219,6 +1407,8 @@ if __name__ == "__main__":
         max_metric_calls=MAX_METRIC_CALLS,   # budget (env: MAX_METRIC_CALLS)
         reflection_lm=teacher_model,         # strong model reflects + proposes
         adapter=adapter,
+        batch_sampler=FixedPanelBatchSampler(),
+        val_evaluation_policy="full_eval",
     )
 
     best = gepa_result.best_candidate
@@ -1228,38 +1418,3 @@ if __name__ == "__main__":
     print(best)
     print(f"Distractor tier usage: {adapter._distractor_tier_counts}")
     print(f"Artifacts written to {RUN_DIR}/")
-
-
-    # batch = trainset[:2]
-    # eval_batch = adapter.evaluate(batch, base_candidate, capture_traces=True)
-    # print("Outputs:", eval_batch.outputs)
-    # print("Scores:", eval_batch.scores)
-    # print("First trajectory:", eval_batch.trajectories[0] if eval_batch.trajectories else None)
-
-    # print(f"Loaded {len(trainset)} examples")
-    
-
-
-    # {"user_id": "AE3KLVXGZPANXE5XLXYKHTVAZ3FQ", "category": "All_Beauty", "history": [{"parent_asin": "B095RWJJB8", "rating": 4.0, "timestamp_ms": 1627679830425, "review_excerpt": "This is a pretty bow however $7 for one bow is pretty expensive considering I can get 10 of these bows for $8 from other sellers.", "review_full": "This is a pretty bow however $7 for one bow is pretty expensive considering I can get 10 of these bows for $8 from other sellers.", "review_title": "Pretty but overpriced", "product": {"title": "Summer Crystal Hair Clip Sparkling Sequins, Double-Layered Alligator Clip Hair Bow Accessory For Women and Girls, Made in Korea, Daily, Party, Cosplay (Holographic)", "brand": null, "price": null, "main_category": "All Beauty"}}, {"parent_asin": "B097JXPZ6D", "rating": 4.0, "timestamp_ms": 1627938153438, "review_excerpt": "This is a cute bow and is exactly what is advertised. I do believe the $10 price point is pretty high considering you can get 10 headbands for $12. It is well made and fits my 4 year old daughter\u2019s head nicely.", "review_full": "This is a cute bow and is exactly what is advertised. I do believe the $10 price point is pretty high considering you can get 10 headbands for $12. It is well made and fits my 4 year old daughter\u2019s head nicely.", "review_title": "Pretty headband", "product": {"title": "Summer Crystal Headband for Girls, 3D Large Glitter Top Bow, Hair Accessory for Girls and Women, Various Occasions, Holidays, Parties, Daily, Cosplay, Gift (Magenta)", "brand": null, "price": null, "main_category": "All Beauty"}}, {"parent_asin": "B08Q8NQMX2", "rating": 4.0, "timestamp_ms": 1628083724757, "review_excerpt": "These are cute and my 4 year old daughter loves them. They come in bright colors however a handful do them has creases wings and I\u2019m not really sure how to get the crease out.", "review_full": "These are cute and my 4 year old daughter loves them. They come in bright colors however a handful do them has creases wings and I\u2019m not really sure how to get the crease out.", "review_title": "Cute butterfly clips but some wings are creased", "product": {"title": "DARKLATER Butterfly Hair Clips for Girls,for Toddler Girls,Baby Girls and Women,Cute Hair Clips,Beautiful Hair Accessories,12 PCS", "brand": null, "price": null, "main_category": "All Beauty"}}, {"parent_asin": "B093JGCRWX", "rating": 3.0, "timestamp_ms": 1628722253112, "review_excerpt": "If this product was indeed EWG verified, it would not only be on the website but it would have the EWG logo on the product plus it wouldn\u2019t have linalool which is high on the allergy list.<br /><br />Other than the linalool, this has decent ingredients. I would stay away from this product if you have malassezia (fungal) acne as olive and japonica may be triggers and/or pore clogging.<br /><br />Like all natural bar shampoos, it won\u2019t lather like traditional synthetic shampoos but it does clean. It takes some getting use too and a period of detoxing for your hair to get use to the change in chemicals if you are switching from synthetic to natural but it is worth it!<br /><br />I would recommend this shampoo bar however I am rather concerned about the EWG verified claim.", "review_full": "I searched the EWG website for this company and product and in many spelling varieties and came up empty handed. If this product was indeed EWG verified, it would not only be on the website but it would have the EWG logo on the product plus it wouldn\u2019t have linalool which is high on the allergy list.<br /><br />Other than the linalool, this has decent ingredients. It is silicone free, paraben free, sulfate free and alcohol free. I would stay away from this product if you have malassezia (fungal) acne as olive and japonica may be triggers and/or pore clogging.<br /><br />Like all natural bar shampoos, it won\u2019t lather like traditional synthetic shampoos but it does clean. It takes some getting use too and a period of detoxing for your hair to get use to the change in chemicals if you are switching from synthetic to natural but it is worth it!<br /><br />I would recommend this shampoo bar however I am rather concerned about the EWG verified claim.", "review_title": "Paraben free, silicone free, sulfate free but not EWG verified", "product": {"title": "The Vegan Glow Quinoa Protein Shampoo Bar | EWG Verified | Vegetable proteins from Quinoa & Soybeans", "brand": null, "price": null, "main_category": "All Beauty"}}], "heldout": {"parent_asin": "B08Z7FQGW3", "rating": 4.0, "timestamp_ms": 1629826110674, "review_excerpt": "This is a beautiful dark purple leaf crown with rose gold metal. It fits my female adult head nicely and that was after I bent it to make it smaller. It wouldn\u2019t fit a small child. My 4 year old daughter was very disappointed that it didn\u2019t fit her. It came quickly and I\u2019m surprised it was damaged due to the lack of product protection. It is well made and a fun addition to anyone's dress up collection!", "review_full": "This is a beautiful dark purple leaf crown with rose gold metal. It fits my female adult head nicely and that was after I bent it to make it smaller. It wouldn\u2019t fit a small child. My 4 year old daughter was very disappointed that it didn\u2019t fit her. It came quickly and I\u2019m surprised it was damaged due to the lack of product protection. It is well made and a fun addition to anyone's dress up collection!", "review_title": "Beautiful crown for adults", "product": {"title": "S SNUOY Purple Crystal Vintage Queen Crowns Baroque Tiaras Wedding Bridal Queen Tiaras and Crowns for Women and Girls Party Headbands", "brand": null, "price": null, "main_category": "All Beauty"}}}
-
-
-
-
-    # user_vector_distributions = {}
-    # totals = {}
-    # counts = {}
-
-    # for i in range(len(trainset)):
-    #     schwartz_vector = trainset[i].schwartz_vector
-    #     if not schwartz_vector:
-    #         print(f"User {i} has no schwartz vector, skipping. {trainset[i].user_id}")
-    #         continue
-    #     balanced_vector = adapter.calibrate_psych_vector(schwartz_vector)
-    #     print(f"User {i} Balanced Schwartz Vector:", balanced_vector)
-    #     #get the dominant trait
-    #     dominant_trait = max(balanced_vector, key=balanced_vector.get)
-    #     if dominant_trait not in user_vector_distributions:
-    #         user_vector_distributions[dominant_trait] = 1
-    #     else:
-    #         user_vector_distributions[dominant_trait] += 1
-    # print("User Vector Distributions:", user_vector_distributions)
