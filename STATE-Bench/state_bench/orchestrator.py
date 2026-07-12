@@ -30,7 +30,11 @@ from state_bench.schemas import (
     Trajectory,
 )
 from state_bench.scoring import compute_efficiency
-from state_bench.simulator import UserSimulator
+from state_bench.simulator import (
+    UserSimulator,
+    conversation_without_monologue,
+    strip_internal_monologue,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +84,10 @@ def _run_harness_executed_agent_turn(
     allowed_names = set(handlers)
 
     turn_tool_calls: list[dict[str, Any]] = []
-    working_conversation = agent.prepare_conversation(list(conversation_full))
+    # Strip Thinker-layer monologue for the agent only; conversation_full keeps full text.
+    working_conversation = agent.prepare_conversation(
+        conversation_without_monologue(conversation_full)
+    )
     final_text = ""
 
     for _ in range(max_tool_rounds):
@@ -230,9 +237,11 @@ def run_task(
     logger.info("User: %s", opening[:100])
 
     for turn in range(domain.max_agent_turns):
-        # Build input for this turn — full conversation for stateless chaining
+        # Build input for this turn — legacy path gets talker-only user text
         if turn > 0:
-            conversation.append({"role": "user", "content": user_response})
+            conversation.append(
+                {"role": "user", "content": strip_internal_monologue(user_response)}
+            )
 
         # BaseAgent turn
         if agent.uses_harness_tool_execution():
@@ -263,7 +272,7 @@ def run_task(
         )
 
         if turn < domain.max_agent_turns - 1:
-            # User simulator responds
+            # User simulator responds (full text incl. monologue kept in conversation_full)
             user_response = simulator.respond(conversation_full)
             conversation_full.append({"role": "user", "content": user_response})
             logger.info("User: %s", user_response[:80])

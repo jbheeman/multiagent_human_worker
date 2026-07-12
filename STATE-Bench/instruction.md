@@ -92,18 +92,30 @@ Classification rules (`classify_terminal`):
 | File | Purpose |
 |------|---------|
 | `clients/nautilus_client.py` | Added `complete_chat()` (sim role) + `from_env(model=...)` override for dual models |
-| `state_bench/scripts/persona_injection.py` | `load_persona_yaml`, `wrap_build_simulator_prompt`, `classify_terminal` |
+| `state_bench/scripts/persona_injection.py` | `load_persona_yaml`, `wrap_build_simulator_prompt`, `classify_terminal` (+ Thinker/Talker guidelines) |
+| `state_bench/simulator.py` | `strip_internal_monologue`, `conversation_without_monologue` (agent-path only) |
+| `state_bench/orchestrator.py` | Strips monologue on agent input; keeps full text in trajectory |
 | `state_bench/scripts/run_unofficial.py` | Dual-Nautilus runner: wrap sim prompt, run, classify, save. No judge. |
 | `tests/test_persona_injection.py` | Prompt-assembly + terminal-classifier tests |
 
-**No edits** to `orchestrator.py`, `simulator.py`, `domain.py`, or any
-`domains/*/simulator.py`. The persona layer is injected by **wrapping** the domain's
-`build_simulator_prompt` callable (a replaceable field on the `DomainConfig` dataclass).
+**No edits** to `domain.py` or any `domains/*/simulator.py`. The persona layer is
+injected by **wrapping** the domain's `build_simulator_prompt` callable. The
+orchestrator strips `<internal_monologue>` only when building agent LLM input; the
+canonical `conversation_full` (and Eval `simulations[].conversation`) keeps the full
+tau2-style Thinker+Talker text.
 
-### Deviations from the original plan (intentional)
-- **No `<internal_monologue>` block.** STATE-Bench's `UserSimulator` returns the full
-  completion into the conversation shown to the agent, so a monologue would leak the user's
-  private reasoning. Attribution lives in the terminal tag instead — same guarantee, no leak.
+### Internal monologue (tau2 parity)
+- Persona guidelines require a Thinker layer (`<internal_monologue>`) then a Talker
+  (visible) message on every reactive reply.
+- Full text is saved inline in Eval aggregates via `Trajectory.to_dict()` →
+  `run_all_personas` (`simulations[].conversation`), matching tau2's
+  `simulations[].messages` content contract.
+- `strip_internal_monologue` / `conversation_without_monologue` in `simulator.py` are
+  applied on the agent path only so private reasoning does not leak to the agent.
+- Satisfaction critic extracts the inner monologue when tags are present; falls back to
+  spoken text for baseline / old transcripts.
+
+### Other notes
 - **Helper lives in `scripts/`, not `clients/`.** The `clients/` dir is auto-exec'd by the
   class loader; a pure helper doesn't belong there and isn't cleanly importable. Under
   `scripts/` (already a package) the runner imports it normally.

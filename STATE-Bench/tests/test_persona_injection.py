@@ -7,6 +7,8 @@ These encode WHY the behavior matters, not just what it does:
 - A non-success terminal (abandon/transfer) MUST carry an attributable trigger; the whole
   point of the design is that "abandoned" counts are defensible (R4 Table 1). A test that
   let abandonment be logged without a cause would not catch the failure that matters.
+- Persona prompts must require a Thinker ``<internal_monologue>`` layer (tau2 parity);
+  without it the critic and attribution quality regress to spoken-text-only.
 """
 
 from __future__ import annotations
@@ -46,6 +48,10 @@ def test_wrapper_preserves_task_facts_and_injects_persona():
     assert "FACTS BIND" in prompt
     assert "[TASK_DONE]" in prompt
     assert "TERMINAL: abandoned" in prompt
+    # tau2 Thinker/Talker contract — without this, monologue never appears in Eval transcripts.
+    assert "<internal_monologue>" in prompt
+    assert "Thinker Layer" in prompt
+    assert "Talker Layer" in prompt
 
 
 def test_persona_id_extracted():
@@ -97,3 +103,14 @@ def test_classify_no_terminal_is_incomplete():
     # Last user message lacks [TASK_DONE] => the run exhausted its turns.
     out = classify_terminal(_conv("still waiting for the refund details"))
     assert out["terminal_state"] == "incomplete"
+
+
+def test_classify_terminal_with_leading_monologue():
+    # Terminal tags live in the Talker layer after the Thinker block; classification must
+    # still see them (Eval transcripts keep the full string).
+    full = (
+        "<internal_monologue>\n**Termination Check**: success met.\n</internal_monologue>\n"
+        "Thanks, that works. [TASK_DONE] [TERMINAL: success]"
+    )
+    out = classify_terminal(_conv(full))
+    assert out["terminal_state"] == "success"

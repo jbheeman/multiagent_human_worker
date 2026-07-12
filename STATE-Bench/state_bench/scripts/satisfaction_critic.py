@@ -9,17 +9,15 @@ It needs nothing but the transcript, so it is independent of STATE-Bench's nativ
 Scoring is ONLINE: each step sees only the assistant's previous response and the user's
 reaction at that turn — never the future — matching "estimate the change at this step."
 
-MONOLOGUE SUBSTITUTION (loud note): the partner's prompt is written for the user's private
-INTERNAL MONOLOGUE, but this pipeline deliberately does NOT emit one (see
-persona_injection.py: a monologue would leak to the agent). We therefore feed the user's
-actual spoken reply as the observed reaction in place of the monologue. The calibrated
-scale (SATISFACTION_SYSTEM, verbatim from the partner) is unchanged, but the input is the
-user's visible message, not their hidden thoughts.
+When the transcript includes a tau2-style ``<internal_monologue>`` block (persona runs),
+the critic is fed the **inner monologue text**. If tags are absent (baseline / old
+transcripts), it falls back to the full spoken user content.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 # --- Critic prompt (partner's calibrated emotion-delta prompt, verbatim system) ----------
@@ -76,11 +74,25 @@ SATISFACTION_USER = """\
 # ASSISTANT'S PREVIOUS RESPONSE
 {assistant_response}
 
-# USER'S INTERNAL MONOLOGUE (their spoken reaction to that response)
+# USER'S INTERNAL MONOLOGUE (their reaction to that response)
 {monologue}
 
 Estimate the emotion_delta for this step as strict JSON.
 """
+
+_INNER_MONOLOGUE_RE = re.compile(
+    r"<internal_monologue>(.*?)</internal_monologue>",
+    re.DOTALL,
+)
+
+
+def extract_monologue_for_critic(content: str) -> str:
+    """Prefer inner ``<internal_monologue>`` text; else return full content (back-compat)."""
+    if content and "<internal_monologue>" in content:
+        match = _INNER_MONOLOGUE_RE.search(content)
+        if match:
+            return match.group(1).strip()
+    return content or ""
 
 
 def _render_message(msg: dict[str, Any]) -> str:
@@ -148,10 +160,11 @@ def score_transcript(client: Any, conversation: list[dict[str, Any]], *, max_tok
     goal = _goal_text(conversation)
     per_turn: list[dict[str, Any]] = []
     for idx in turn_indices:
+        user_content = _render_message(conversation[idx])
         prompt = SATISFACTION_USER.format(
             goal=goal,
             assistant_response=_prev_assistant_response(conversation, idx),
-            monologue=_render_message(conversation[idx]),
+            monologue=extract_monologue_for_critic(user_content),
         )
         try:
             resp = client.complete_json(prompt=prompt, system_prompt=SATISFACTION_SYSTEM, max_tokens=max_tokens)

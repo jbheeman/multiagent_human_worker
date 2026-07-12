@@ -4,10 +4,38 @@ The UserSimulator receives an assembled system prompt (personality + task contex
 + base rules + task-specific rules) and responds in character.
 """
 
+from __future__ import annotations
+
 import json
+import re
 from typing import Any
 
 from state_bench.client import LLMClient, PooledLLMClient
+
+# tau2-parity: persona sim may emit <internal_monologue>; strip only on the agent path.
+_MONOLOGUE_RE = re.compile(r"<internal_monologue>.*?</internal_monologue>\s*", re.DOTALL)
+
+
+def strip_internal_monologue(content: str) -> str:
+    """Remove a Thinker-layer ``<internal_monologue>`` block from user text (tau2 regex)."""
+    if content and "<internal_monologue>" in content:
+        return _MONOLOGUE_RE.sub("", content).strip()
+    return content
+
+
+def conversation_without_monologue(conversation: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Shallow-copy conversation with monologue stripped from user ``content`` strings.
+
+    Does not mutate the input. Non-user messages are copied as ``dict(msg)`` so callers
+    can safely append to the working copy without touching the canonical transcript.
+    """
+    out: list[dict[str, Any]] = []
+    for msg in conversation:
+        copied = dict(msg)
+        if copied.get("role") == "user" and isinstance(copied.get("content"), str):
+            copied["content"] = strip_internal_monologue(copied["content"])
+        out.append(copied)
+    return out
 
 
 class UserSimulator:
