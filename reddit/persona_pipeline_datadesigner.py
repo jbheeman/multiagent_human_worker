@@ -101,29 +101,23 @@ def persona_to_yaml(persona: dict) -> str:
 # gepa_result.best_candidate["persona_prompt"].
 
 OPTIMIZED_GEPA_FULL_PROMPT = """\
-You are an expert psychological profiler. From the user's behavioral corpus, write a functional first-person behavioral profile — psychologically vivid enough that someone reading it could predict how this person communicates, argues, and reacts under pressure in a task-oriented dialogue.
+You are an expert psychological profiler. From the user's behavioral corpus, write a first‑person portrait that someone reading it could predict how this person communicates, argues, and reacts under pressure — using only the language, phrasing, tone, and formatting that appear in the user's own posts.
 
-Do not write rigid rules ("never give my zip code"). Write the psychological reasoning ("I treat personal data like something to hoard because..."). Do not write dialogues, transcripts, or invented transactional details.
+Do not write rules or explanations. Write only in the user's own voice, as if the user were describing themselves. Every profanity, sarcasm, blunt phrase, or casual abbreviation you include must be taken directly from the user's turns; do not introduce any word, idiom, or syntactic pattern that does not appear in the corpus.
 
-USER CORPUS (speaker-attributed; [USER]/[INTERLOCUTOR]/[QUOTED] turns under [r/subreddit] headers):
+Register is non‑negotiable: match the source's actual vocabulary level, sentence length, punctuation habits, and formatting style. If the user writes in short, staccato bursts, the portrait must be short and staccato. If the user uses all‑caps for emphasis, replicate that. If the user is profane, crude, or contemptuous, keep that language on the page.
+
+Never write the literal Schwartz dimension names or close derivatives — in any form (capitalized, lowercase, or as an adjective/noun) — including: power, achievement, hedonism, stimulation, self‑direction, universalism, benevolence, tradition, conformity, security. Do not print numbers, percentages, or vector/profile language (“my X score”, “my vector”, “rates high on Y”, “feeds my Z streak”).
+
+Do not add headers, bullet points, roman numerals, or any structural formatting that is not present in the user's posts. The portrait should be a single continuous first‑person narrative, not a list.
+
+Construct the portrait by extracting sentences verbatim from the corpus and arranging them into a coherent narrative. You may add only the minimum number of single words or simple connecting phrases necessary to create flow between extracted sentences. Do not paraphrase, rephrase, or interpret any content. Each sentence in the portrait must appear word‑for‑word in the corpus. If a phrase from the corpus is ambiguous, use it exactly as written without adding external context. The resulting portrait must be a faithful rearrangement of the user's own words only.
+
+USER CORPUS (speaker‑attributed; [USER]/[INTERLOCUTOR]/[QUOTED] turns under [r/subreddit] headers):
 {{ user_corpus }}
 
-CORPUS INSTRUCTIONS:
-- Build the profile ONLY from USER turns — character, register, disposition, triggers.
-- INTERLOCUTOR and QUOTED turns are context for how this user argues and reacts; never attribute quoted views, beliefs, or biography to the profile.
-- Transfer how they write and argue, not their Reddit topics or subculture jargon as identity.
-- ABSTRACT THE METHOD, NOT THE METAPHOR: If a user argues about sports fouls to demand precision, do not write "I treat vague language like a foul call." Write "I treat vague language as a risk to accuracy that requires immediate clarification." Keep the cognitive drive, drop the topic-specific analogy. The profile must remain valid even if the interaction format changes from forum post to direct task.
-- VALUE-CALIBRATED INTENSITY: Use the Latent Value Profile to weight the intensity of behaviors. If a value score is low (<0.35), do not write behaviors driven by that value even if the corpus shows occasional spikes. Prioritize the top 2-3 values from the vector as the core drivers. A user with low "Power" scores must not sound domineering, even if they are confident.
-- GROUNDING IS ABSOLUTE: You cannot attribute a writing habit (bullets, edits, headers, specific punctuation) to the user unless it appears in the provided USER CORPUS. If the user writes in paragraphs, do not claim "I use bullet points." If the user does not use "Edit:" tags, do not claim "I add Edit notes."
-- TONAL FIDELITY: Match the corpus temperature exactly. Do not invent hostility, profanity, or emotional intensity unless it is present in the text. Do not invent physical modalities (raising voice, physical presence) for text-based users. A user who writes politely about marriage must be profiled as polite, even if their values suggest "passion." Do not sand down a hostile user, but do not amplify a polite one.
-- REGISTER IS NON-NEGOTIABLE: Match the source's actual vocabulary level and sentence length. Do not upgrade their diction, smooth their syntax, or wrap the profile in essay structure (headers, roman numerals, bolded thesis lines) unless the user actually writes that way.
-
-LATENT VALUE PROFILE (use this vector to weight the priority and intensity of traits observed in the corpus; treat it as research you will never quote, not as vocabulary to use):
+LATENT VALUE PROFILE (treat this as research you will never quote, not as vocabulary to use):
 {{ schwartz_json }}
-
-VALUE-NAME LEAK IS A FAILURE, NOT A STYLE CHOICE. Never write the literal Schwartz dimension names or close derivatives -- in any form (capitalized, lowercase, or as an adjective/noun) -- including: power, achievement, hedonism/hedonistic, stimulation, self-direction, universalism, benevolence, tradition, conformity, security. Do not print numbers, percentages, or vector/profile language ("my X score", "my vector", "rates high on Y", "feeds my Z streak"). Express the SAME priorities only through what the person notices, wants, argues for, and reacts to -- never through the label of the value itself. Use the values to understand *why* the user cares, but NEVER let them override the *style* observed in the corpus. Before finishing, re-read every sentence for one of the banned words above and rewrite it if found.
-
-BEHAVIORAL PREDICTION CHECK: Ensure every psychological claim implies an observable action in a dialogue. Instead of abstract traits ("I value precision"), describe the reaction ("I interrupt vague answers to request exact timestamps"). Focus on **triggers** (what frustrates them), **verification** (how they confirm truth), and **escalation** (what makes them demand authority), rather than **narrative flow** (how they order sentences). The goal is to simulate a user in a customer-support task, not to replicate a forum post. Ensure behaviors are **Cross-Context Valid**: Would this behavior still make sense if the user were booking a flight instead of discussing sports? If not, generalize the underlying need.
 
 EXTERNAL CONTENT THIS USER QUOTED OR ENGAGED WITH (selection + stance; secondary signal):
 {{ quote_signals }}
@@ -144,7 +138,7 @@ USER CORPUS (speaker-attributed; [USER]/[INTERLOCUTOR]/[QUOTED] turns under [r/s
 {{ user_corpus }}
 
 CORPUS INSTRUCTIONS:
-- STRICT GROUNDING PROTOCOL: The portrait must be a behavioral synthesis of {{ user_corpus }}
+- STRICT GROUNDING PROTOCOL: The portrait must be a behavioral synthesis of the user_corpus
   ONLY. Every topic, skill, reference, relationship, and biographical detail in the portrait
   must be traceable to the user's actual turns. If the user discusses a game, the portrait
   may reference that game, but must not invent specific mechanics, items, ranks, or lore
@@ -161,11 +155,11 @@ CORPUS INSTRUCTIONS:
   essay structure unless the user actually writes that way. Sanding a hostile or crude user
   into an articulate, agreeable, or academic-sounding one is a FAILURE.
 
-LATENT VALUE PROFILE (ground the portrait's behavioral drivers in this vector; treat it as
+LATENT VALUE PROFILE  (ground the portrait's behavioral drivers in this vector; treat it as
 a lens for priorities and reactions, never as a source of content):
 {{ schwartz_json }}
 
-- BEHAVIORAL MAPPING ONLY: Use {{ schwartz_json }} exclusively to modulate the persona's
+- BEHAVIORAL MAPPING ONLY: Use schwartz_json exclusively to modulate the persona's
   priorities, emotional triggers, argumentation style, risk tolerance, and what they notice
   or value. The vector explains the "how" and "why" of behavior, never the "what".
 - VALUES DO NOT GENERATE CONTENT: High scores in dimensions like ACHIEVEMENT, STIMULATION,
