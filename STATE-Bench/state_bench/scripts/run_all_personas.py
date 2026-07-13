@@ -191,6 +191,7 @@ def main() -> None:
 
             simulations: list[dict] = []
             task_meta: list[dict] = []
+            n_err = 0
             for task in tasks:
                 if not task.user_id:
                     print(f"    [skip] {task.task_id}: task has no user_id")
@@ -211,7 +212,30 @@ def main() -> None:
                         agent_model=model,
                     )
                 except Exception as exc:  # noqa: BLE001 - fail loud per task, keep going
-                    print(f"    [ERR] {task.task_id}: {type(exc).__name__}: {exc}")
+                    # Still persist a row so ERRs are analyzable (no transcript if crash
+                    # happened before the orchestrator could salvage one).
+                    err = f"{type(exc).__name__}: {exc}"
+                    print(f"    [ERR] {task.task_id}: {err}")
+                    simulations.append(
+                        {
+                            "task_id": task.task_id,
+                            "user_id": task.user_id,
+                            "task_summary": getattr(task, "task_summary", None),
+                            "error": err,
+                            "terminal_state": "error",
+                            "terminal_trigger": err,
+                            "conversation": [],
+                            "state_requirements_met": None,
+                            "turns": 0,
+                            "tool_calls": 0,
+                            "tool_errors": 0,
+                            "redundant_calls": 0,
+                        }
+                    )
+                    task_meta.append(
+                        {"task_id": task.task_id, "task_summary": getattr(task, "task_summary", None)}
+                    )
+                    n_err += 1
                     continue
                 sim = traj.to_dict()
                 sim["task_id"] = task.task_id
@@ -219,13 +243,18 @@ def main() -> None:
                 task_meta.append({"task_id": task.task_id, "task_summary": getattr(task, "task_summary", None)})
                 term = traj.metadata.get("terminal_state")
                 met = traj.state_requirements_score.score if traj.state_requirements_score else None
-                print(f"    [ok] {task.task_id}: terminal={term} | state_requirements_met={met}")
+                if traj.error:
+                    n_err += 1
+                    print(f"    [ERR] {task.task_id}: {traj.error} | terminal={term} | state_requirements_met={met}")
+                else:
+                    print(f"    [ok] {task.task_id}: terminal={term} | state_requirements_met={met}")
 
             aggregate = {
                 "timestamp": _dt.datetime.now().isoformat(),
                 "info": {
                     "git_commit": commit,
                     "num_tasks": len(simulations),
+                    "num_errors": n_err,
                     "domain": args.domain,
                     "scoring": "unofficial persona run (no judge)",
                     "user_info": {
@@ -243,7 +272,7 @@ def main() -> None:
             }
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(json.dumps(aggregate, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-            print(f"  -> {dest} ({len(simulations)} tasks)")
+            print(f"  -> {dest} ({len(simulations)} tasks, {n_err} errors)")
             done += 1
 
     if args.dry_run:

@@ -158,6 +158,46 @@ class DummyDomain:
         return "sim prompt"
 
 
+class AlwaysToolAgent(BaseAgent):
+    """Keeps requesting tools forever — hits the harness per-turn round limit."""
+
+    def generate_next_turn(self, *, system_prompt, conversation, tools):
+        return AgentTurnResponse(
+            text="Still checking.",
+            tool_calls=[{"name": "lookup", "arguments": {"id": "BK-1"}}],
+        )
+
+
+def test_harness_max_tool_rounds_returns_partial_trajectory():
+    """Max tool rounds must not drop the transcript — errors are analyzable."""
+    from unittest.mock import patch
+
+    agent = AlwaysToolAgent(
+        runtime_context=AgentRuntimeContext(
+            task_id="task-1", user_id="user_001", domain="travel", now="2026-06-15T10:00:00"
+        )
+    )
+    with patch("state_bench.orchestrator.UserSimulator", return_value=MagicMock()):
+        trajectory = run_task(
+            task=DummyTask(),
+            env_data=DummyEnvData(),
+            user_id="user_001",
+            client=None,
+            simulator_client=MagicMock(),
+            domain=DummyDomain(),
+            agent=agent,
+            env=DummyEnv(DummyEnvData(), now="2026-06-15T10:00:00"),
+        )
+
+    assert trajectory.error is not None
+    assert "max tool rounds" in trajectory.error
+    assert trajectory.metadata["terminal_state"] == "error"
+    assert trajectory.conversation[0]["role"] == "user"
+    assert trajectory.conversation[1]["role"] == "assistant"
+    assert trajectory.conversation[1]["tool_calls"]
+    assert trajectory.efficiency.tool_calls == 8
+
+
 def test_custom_agent_can_use_own_client_and_harness_executes_tools():
     simulator = MagicMock()
     simulator.respond.return_value = "[TASK_DONE]"

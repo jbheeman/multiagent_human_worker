@@ -25,6 +25,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 
@@ -97,11 +98,16 @@ def run_one_trajectory(
         simulator_client=sim_client,
         agent_class=agent_class,
     )
-    trajectory.metadata.update(classify_terminal(trajectory.conversation))
+    # Preserve orchestrator-set error terminals (e.g. max tool rounds); otherwise classify.
+    if trajectory.error:
+        trajectory.metadata.setdefault("terminal_state", "error")
+        trajectory.metadata.setdefault("terminal_trigger", trajectory.error)
+    else:
+        trajectory.metadata.update(classify_terminal(trajectory.conversation))
     trajectory.state_requirements_score = evaluate_state_requirements(
         task, trajectory.state_diff or StateDiff(created={}, modified={}, deleted={})
     )
-    if satisfaction_client is not None:
+    if satisfaction_client is not None and not trajectory.error:
         trajectory.metadata.update(score_transcript(satisfaction_client, trajectory.conversation))
     return trajectory
 
@@ -235,8 +241,28 @@ def main() -> None:
                     agent_model=args.agent_model,
                 )
             except Exception as exc:  # noqa: BLE001 - fail loud per task, keep the batch going
-                print(f"  [ERR] {task.task_id}: {type(exc).__name__}: {exc}")
-                summary.append({"task_id": task.task_id, "persona_id": persona_key, "status": "ERR"})
+                err = f"{type(exc).__name__}: {exc}"
+                print(f"  [ERR] {task.task_id}: {err}")
+                # Persist a stub so the failure is not invisible in the output dir.
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(
+                    json.dumps(
+                        {
+                            "task_id": task.task_id,
+                            "user_id": user_id,
+                            "task_summary": getattr(task, "task_summary", None),
+                            "error": err,
+                            "terminal_state": "error",
+                            "terminal_trigger": err,
+                            "conversation": [],
+                        },
+                        indent=2,
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                summary.append({"task_id": task.task_id, "persona_id": persona_key, "status": "ERR", "error": err})
                 continue
 
             state_score = trajectory.state_requirements_score
@@ -245,6 +271,21 @@ def main() -> None:
             trig = trajectory.metadata.get("terminal_trigger")
             state_met = state_score.score if state_score else None
             sat = trajectory.metadata.get("satisfaction_cumulative")
+            if trajectory.error:
+                print(
+                    f"  [ERR] {task.task_id}: {trajectory.error} | terminal={term} | state_requirements_met={state_met}"
+                )
+                summary.append(
+                    {
+                        "task_id": task.task_id,
+                        "persona_id": persona_key,
+                        "status": "ERR",
+                        "error": trajectory.error,
+                        "terminal_state": term,
+                        "state_requirements_met": state_met,
+                    }
+                )
+                continue
             print(
                 f"  [ok] {task.task_id}: terminal={term} | state_requirements_met={state_met}"
                 + (f" | satisfaction(cum={sat}, worst={trajectory.metadata.get('satisfaction_worst_case')})" if sat is not None else "")

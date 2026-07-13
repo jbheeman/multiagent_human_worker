@@ -39,6 +39,22 @@ from state_bench.simulator import (
 logger = logging.getLogger(__name__)
 
 
+class HarnessToolRoundLimitError(RuntimeError):
+    """Agent kept requesting tools past the per-turn harness limit; partial turn is salvageable."""
+
+    def __init__(
+        self,
+        max_tool_rounds: int,
+        *,
+        agent_text: str,
+        tool_calls: list[dict[str, Any]],
+    ) -> None:
+        super().__init__(f"BaseAgent exceeded max tool rounds ({max_tool_rounds})")
+        self.max_tool_rounds = max_tool_rounds
+        self.agent_text = agent_text
+        self.tool_calls = tool_calls
+
+
 def _normalize_agent_turn_response(response: AgentTurnResponse | dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
     if isinstance(response, AgentTurnResponse):
         text = response.text
@@ -126,7 +142,11 @@ def _run_harness_executed_agent_turn(
             }
         )
 
-    raise RuntimeError(f"BaseAgent exceeded max tool rounds ({max_tool_rounds})")
+    raise HarnessToolRoundLimitError(
+        max_tool_rounds,
+        agent_text=final_text,
+        tool_calls=turn_tool_calls,
+    )
 
 
 def run_task(
@@ -232,6 +252,8 @@ def run_task(
     conversation_full: list[dict[str, Any]] = [{"role": "user", "content": opening}]
     all_tool_calls: list[dict[str, Any]] = []
     user_response: str = ""
+    run_error: str | None = None
+    meta = dict(trajectory_metadata or {})
 
     logger.info("Task: %s | User: %s | Now: %s", task.task_id, user_id, now)
     logger.info("User: %s", opening[:100])
@@ -243,18 +265,25 @@ def run_task(
                 {"role": "user", "content": strip_internal_monologue(user_response)}
             )
 
-        # BaseAgent turn
-        if agent.uses_harness_tool_execution():
-            agent_text, tool_calls = _run_harness_executed_agent_turn(
-                agent=agent,
-                system_prompt=agent_system_prompt,
-                conversation_full=conversation_full,
-                domain_tools=domain.tool_schemas,
-                domain_tool_handlers=env.tool_handlers,
-            )
+        # BaseAgent turn — salvage partial transcript if the harness tool loop hits its cap
+        try:
+            if agent.uses_harness_tool_execution():
+                agent_text, tool_calls = _run_harness_executed_agent_turn(
+                    agent=agent,
+                    system_prompt=agent_system_prompt,
+                    conversation_full=conversation_full,
+                    domain_tools=domain.tool_schemas,
+                    domain_tool_handlers=env.tool_handlers,
+                )
+                raw_items = [{"role": "assistant", "content": agent_text}]
+            else:
+                agent_text, tool_calls, raw_items = agent.act(conversation)
+        except HarnessToolRoundLimitError as exc:
+            agent_text = exc.agent_text
+            tool_calls = exc.tool_calls
             raw_items = [{"role": "assistant", "content": agent_text}]
-        else:
-            agent_text, tool_calls, raw_items = agent.act(conversation)
+            run_error = str(exc)
+            logger.warning("Turn %s aborted: %s", turn + 1, run_error)
 
         all_tool_calls.extend(tool_calls)
         conversation.extend(raw_items)  # Append raw output items for legacy stateless chaining
@@ -270,6 +299,9 @@ def run_task(
         logger.info(
             "Turn %s: %s | %s", turn + 1, tc_names if tc_names else "no tools", agent_text[:80] if agent_text else ""
         )
+
+        if run_error:
+            break
 
         if turn < domain.max_agent_turns - 1:
             # User simulator responds (full text incl. monologue kept in conversation_full)
@@ -297,6 +329,11 @@ def run_task(
     if state_diff:
         logger.info("State Diff: %s", "empty" if state_diff.is_empty() else "changes detected")
 
+    if run_error:
+        meta["terminal_state"] = "error"
+        meta["terminal_trigger"] = run_error
+        meta["terminal_agent_behavior"] = None
+
     trajectory = Trajectory(
         task_id=task.task_id,
         user_id=user_id,
@@ -305,7 +342,8 @@ def run_task(
         state_diff=state_diff,
         efficiency=efficiency,
         token_usage=agent.token_usage,
-        metadata=trajectory_metadata or {},
+        metadata=meta,
+        error=run_error,
     )
     agent.ingest_trajectory(trajectory)
     return trajectory
