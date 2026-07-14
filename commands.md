@@ -400,49 +400,6 @@ Two orthogonal axes per (task) record: `terminal_state` (persona satisfaction, N
 
 
 
-PARNTER PROMPT: _SYSTEM_PROMPT = “”"\
-You are evaluating how a user’s emotion changes after a single interaction step.
-The user’s INTERNAL MONOLOGUE reflects their true thoughts and feelings.
----
-# INPUT
-You are given:
-- the user’s goal
-- the assistant’s previous response
-- the user’s INTERNAL MONOLOGUE after that response
----
-# TASK
-Determine how the user’s emotion changed as a result of the assistant’s response.
----
-# OUTPUT
-Return:
-emotion_delta ∈ [-10, +10]
----
-# GUIDELINES
-Base your judgment primarily on the INTERNAL MONOLOGUE.
-Interpret the monologue as the user’s reaction to the assistant’s response.
-Use the following scale consistently:
-- No emotional change → 0
-- Mild reaction (slight concern, mild satisfaction) → ±1 to ±3
-- Moderate reaction (noticeable concern, annoyance, appreciation) → ±4 to ±6
-- Strong emotion (frustration, relief, disappointment) → ±7 to ±9
-- Very strong emotion (e.g., “unacceptable”, escalation, demanding supervisor) → ±9 to ±10
-CRITICAL:
-- Strong emotional language MUST produce large magnitude deltas (≥ |8|)
-- Do NOT underestimate frustration or escalation signals
-- If the monologue expresses increasing frustration, assign a negative delta
-- If it expresses relief or satisfaction, assign a positive delta
-- If the monologue contains only planning or neutral reasoning, assign 0 or a very small delta
----
-# IMPORTANT
-- Do NOT consider any future conversation
-- Do NOT try to maintain or infer an absolute score
-- Only estimate the CHANGE in emotion at this step
----
-# RESPONSE FORMAT
-{
-  “emotion_delta”: <number>,
-  “feeling”: “<brief explanation grounded in the internal monologue>”
-}“”"
 
 
 <!-- 
@@ -454,3 +411,24 @@ uv run python -m state_bench.scripts.run_unofficial \
   --agent-model gpt-oss \
   --no-satisfaction \
   --output-dir outputs/${DOMAIN}_persona_k100  -->
+
+
+  <!-- uv run python -m state_bench.scripts.run_all_personas   --models gpt-oss   --domain customer_support --num-tasks 20   --sim-model gemma   --eval-dir ../reddit/Eval/statebench_baseline_gpt_oss_travel   --no-persona --skip-existing -->
+
+
+# regenerate / validate assignment
+python eval/mcts/generate_assignment.py --bench both
+python eval/mcts/validate_assignment.py
+
+# dry-run smoke (2 tasks × 2 personas × 2 arms)
+python eval/mcts/run_mcts.py --bench tau2 --domain retail --models gpt-oss --sim-model gemma \
+  --arms fixed_prompt value_only \
+  --arm-jsonl value_only=reddit/AblationPersonas/value_only_personas_opt.jsonl \
+  --arm-jsonl fixed_prompt= \
+  --limit-tasks 2 --limit-personas-per-task 2 --dry-run --skip-existing
+
+# real run requires --confirm
+python eval/mcts/run_mcts.py --bench statebench --domain travel --models gpt-oss --sim-model gemma \
+  --arms fixed_prompt value_only \
+  --arm-jsonl value_only=reddit/AblationPersonas/value_only_personas_opt.jsonl \
+  --confirm --skip-existing
