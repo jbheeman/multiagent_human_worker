@@ -398,37 +398,80 @@ Two orthogonal axes per (task) record: `terminal_state` (persona satisfaction, N
 `state_requirements_met` (0/1 objective) + `satisfaction_cumulative/_worst_case/_mean/_final`
 + `satisfaction_per_turn[]`. See `STATE-Bench/instruction.md` for the full design.
 
+---
 
+# MCTS Phase-1 (persona-sampled eval) — unofficial collection
 
+Shared assignment + dual-bench runner under `eval/mcts/`. Emits **core** `rollouts_core.jsonl`
+(no `satisfaction_*`; partner can enrich later). STATE-Bench path is the same unofficial
+Nautilus stack as `run_unofficial` / `run_all_personas` (not the locked GPT-5.4 judge).
 
+## Assignment (once)
 
-<!-- 
-uv run python -m state_bench.scripts.run_unofficial \
-  --domain $DOMAIN \
-  --task $TASKS \
-  --persona-dir ../reddit/.personas_yaml_cache_personas_axis_a_reddit_schwartz_unopt_k100 \
-  --sim-model gemma \
-  --agent-model gpt-oss \
-  --no-satisfaction \
-  --output-dir outputs/${DOMAIN}_persona_k100  -->
-
-
-  <!-- uv run python -m state_bench.scripts.run_all_personas   --models gpt-oss   --domain customer_support --num-tasks 20   --sim-model gemma   --eval-dir ../reddit/Eval/statebench_baseline_gpt_oss_travel   --no-persona --skip-existing -->
-
-
-# regenerate / validate assignment
+```bash
+cd ~/multiagent_human_worker
 python eval/mcts/generate_assignment.py --bench both
 python eval/mcts/validate_assignment.py
+```
 
-# dry-run smoke (2 tasks × 2 personas × 2 arms)
+## Dry-run smoke (both benches)
+
+```bash
+cd ~/multiagent_human_worker
+
+# tau2 — use tau2-bench venv (or any env with `tau2` on PATH)
 python eval/mcts/run_mcts.py --bench tau2 --domain retail --models gpt-oss --sim-model gemma \
   --arms fixed_prompt value_only \
   --arm-jsonl value_only=reddit/AblationPersonas/value_only_personas_opt.jsonl \
   --arm-jsonl fixed_prompt= \
   --limit-tasks 2 --limit-personas-per-task 2 --dry-run --skip-existing
 
-# real run requires --confirm
-python eval/mcts/run_mcts.py --bench statebench --domain travel --models gpt-oss --sim-model gemma \
+# STATE-Bench — MUST use STATE-Bench uv env (repo-root .venv lacks azure-identity)
+uv run --project STATE-Bench python eval/mcts/run_mcts.py \
+  --bench statebench --domain travel --models gpt-oss --sim-model gemma \
   --arms fixed_prompt value_only \
   --arm-jsonl value_only=reddit/AblationPersonas/value_only_personas_opt.jsonl \
+  --arm-jsonl fixed_prompt= \
+  --no-satisfaction \
+  --limit-tasks 2 --limit-personas-per-task 2 --dry-run --skip-existing
+```
+
+## Real unofficial runs (`--confirm`)
+
+`--no-satisfaction` is the **default** for STATE-Bench (skip turn-level critic). Pass
+`--with-satisfaction` only if you want the critic inline. Tau2 has no satisfaction critic;
+`--no-satisfaction` is a no-op there.
+
+```bash
+cd ~/multiagent_human_worker
+set -a && source STATE-Bench/.env && set +a   # NAUT_* for statebench
+
+# --- STATE-Bench travel (unofficial, no critic) ---
+uv run --project STATE-Bench python eval/mcts/run_mcts.py \
+  --bench statebench --domain travel --models gpt-oss --sim-model gemma \
+  --arms fixed_prompt value_only \
+  --arm-jsonl value_only=reddit/AblationPersonas/value_only_personas_opt.jsonl \
+  --arm-jsonl fixed_prompt= \
+  --no-satisfaction \
+  --eval-dir reddit/Eval/mcts_phase1 \
   --confirm --skip-existing
+
+# --- tau2 retail (unofficial Nautilus agent/sim; same assignment file) ---
+# Activate tau2-bench venv first if needed:  source tau2-bench/.venv/bin/activate
+python eval/mcts/run_mcts.py \
+  --bench tau2 --domain retail --models gpt-oss --user-llm openai/gemma \
+  --arms fixed_prompt value_only \
+  --arm-jsonl value_only=reddit/AblationPersonas/value_only_personas_opt.jsonl \
+  --arm-jsonl fixed_prompt= \
+  --eval-dir reddit/Eval/mcts_phase1 \
+  --confirm --skip-existing
+```
+
+Add more arms when JSONLs exist, e.g. `--arms fixed_prompt value_only behavior_only` and
+`--arm-jsonl behavior_only=reddit/AblationPersonas/behavior_only_optimized_personas.jsonl`.
+
+Schema check:
+
+```bash
+python eval/mcts/check_schema.py reddit/Eval/mcts_phase1/rollouts_core.jsonl
+```

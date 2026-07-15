@@ -199,6 +199,22 @@ def main() -> None:
     parser.add_argument("--statebench-root", type=Path, default=repo / "STATE-Bench")
     parser.add_argument("--max-retries", type=int, default=9)
     parser.add_argument(
+        "--no-satisfaction",
+        action="store_true",
+        default=True,
+        help="STATE-Bench: skip turn-level satisfaction critic (default). Tau2 ignores this.",
+    )
+    parser.add_argument(
+        "--with-satisfaction",
+        action="store_true",
+        help="STATE-Bench: enable satisfaction critic (overrides --no-satisfaction).",
+    )
+    parser.add_argument(
+        "--satisfaction-model",
+        default=None,
+        help="STATE-Bench critic model when --with-satisfaction (default: qwen3-small).",
+    )
+    parser.add_argument(
         "--cost-per-conversation-usd",
         type=float,
         default=None,
@@ -337,8 +353,17 @@ def main() -> None:
         else:
             sim_for_backend = f"openai/{sim_model}"
     else:
-        backend = StateBenchBackend(repo_root=args.statebench_root.resolve())
+        sat_model = args.satisfaction_model or cfg.get("satisfaction_model") or "qwen3-small"
+        backend = StateBenchBackend(
+            repo_root=args.statebench_root.resolve(),
+            satisfaction_model=sat_model,
+        )
         sim_for_backend = sim_model.split("/")[-1]
+
+    no_satisfaction = not args.with_satisfaction
+    if bench == "statebench":
+        sat_label = "OFF" if no_satisfaction else f"ON ({sat_model})"
+        print(f"satisfaction={sat_label}")
 
     completed = load_completed_run_ids(rollouts_jsonl) if args.skip_existing else {}
     cache_root = eval_dir / ".persona_yaml_cache"
@@ -388,6 +413,7 @@ def main() -> None:
                     persona_yaml_text=persona_text,
                     eval_dir=eval_dir,
                     dry_run=args.dry_run,
+                    no_satisfaction=no_satisfaction,
                 )
                 result = backend.run(req)
 

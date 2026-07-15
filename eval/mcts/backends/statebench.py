@@ -15,10 +15,12 @@ from eval.mcts.terminal import map_statebench_terminal
 class StateBenchBackend:
     name = "statebench"
 
-    def __init__(self, repo_root: Path) -> None:
+    def __init__(self, repo_root: Path, satisfaction_model: str = "qwen3-small") -> None:
         self.repo_root = repo_root.resolve()
+        self.satisfaction_model = satisfaction_model
         self._agent_clients: dict[str, Any] = {}
         self._sim_clients: dict[str, Any] = {}
+        self._satisfaction_clients: dict[str, Any] = {}
         self._agent_class = None
         self._client_class = None
         self._seed_gap_logged = False
@@ -32,18 +34,36 @@ class StateBenchBackend:
         from dotenv import load_dotenv
 
         load_dotenv(self.repo_root / ".env")
-        from state_bench.agents.loader import load_root_agent_class, load_root_client_class
+        try:
+            from state_bench.agents.loader import load_root_agent_class, load_root_client_class
+        except ModuleNotFoundError as exc:
+            missing = getattr(exc, "name", None) or str(exc)
+            raise SystemExit(
+                "STATE-Bench import failed "
+                f"({missing}). Run MCTS statebench via its uv env, e.g.\n"
+                "  cd ~/multiagent_human_worker\n"
+                "  uv run --project STATE-Bench python eval/mcts/run_mcts.py "
+                "--bench statebench ... --no-satisfaction --confirm\n"
+                "Do not use the repo-root .venv for --bench statebench "
+                "(it lacks azure-identity / STATE-Bench deps)."
+            ) from exc
 
-        self._client_class = load_root_client_class("NautilusClient")
-        self._agent_class = load_root_agent_class("NautilusAgent")
+        self._client_class = load_root_client_class("NautilusClient", root=self.repo_root)
+        self._agent_class = load_root_agent_class("NautilusAgent", root=self.repo_root)
 
-    def _get_clients(self, model: str, sim_model: str):
+    def _get_clients(self, model: str, sim_model: str, *, with_satisfaction: bool):
         self._ensure_imports()
         if model not in self._agent_clients:
             self._agent_clients[model] = self._client_class.from_env(model=model)
         if sim_model not in self._sim_clients:
             self._sim_clients[sim_model] = self._client_class.from_env(model=sim_model)
-        return self._agent_clients[model], self._sim_clients[sim_model]
+        satisfaction_client = None
+        if with_satisfaction:
+            sat = self.satisfaction_model
+            if sat not in self._satisfaction_clients:
+                self._satisfaction_clients[sat] = self._client_class.from_env(model=sat)
+            satisfaction_client = self._satisfaction_clients[sat]
+        return self._agent_clients[model], self._sim_clients[sim_model], satisfaction_client
 
     def run(self, req: RolloutRequest) -> RolloutResult:
         if not self._seed_gap_logged:
@@ -111,7 +131,11 @@ class StateBenchBackend:
             persona_yaml = load_persona_yaml(req.persona_yaml_path)
             persona_id = persona_id_from_yaml(persona_yaml, fallback=persona_key)
 
-        agent_client, sim_client = self._get_clients(req.model, req.sim_model)
+        agent_client, sim_client, satisfaction_client = self._get_clients(
+            req.model,
+            req.sim_model,
+            with_satisfaction=not req.no_satisfaction,
+        )
         model_dir.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -125,7 +149,7 @@ class StateBenchBackend:
                 agent_client=agent_client,
                 sim_client=sim_client,
                 agent_class=self._agent_class,
-                satisfaction_client=None,  # Phase 1: never run critic
+                satisfaction_client=satisfaction_client,
                 sim_model=req.sim_model,
                 agent_model=req.model,
             )

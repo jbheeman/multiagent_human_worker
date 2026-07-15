@@ -22,6 +22,7 @@ class RolloutRequest:
     persona_yaml_text: str | None
     eval_dir: Path
     dry_run: bool = False
+    no_satisfaction: bool = True  # STATE-Bench: skip turn-level critic (default for unofficial)
     extra: dict[str, Any] = field(default_factory=dict)
 
 
