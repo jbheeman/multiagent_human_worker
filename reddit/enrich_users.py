@@ -27,6 +27,11 @@ from pvq import (
 #      scored with the Schwartz key.
 #   (Demographics: dropped for Reddit arm — fabrication risk, no behavioral benefit.)
 #
+# Diagnostic-only Nemotron arm (ENRICH_MODE=nemotron):
+#   Administer PVQ-40 from synthetic persona profile text (persona_yaml /
+#   demographics). NOT register-matched to Reddit PVQ (behavioral posts vs
+#   synthetic descriptions). Writes a sidecar JSONL; does not claim parity.
+#
 # Set MOCK_LLM=1 to run offline. Mock exercises the same reconstruction path.
 # ---------------------------------------------------------------------------
 load_dotenv()
@@ -36,8 +41,13 @@ if not MOCK_LLM and not NAUT_API_KEY:
     raise ValueError("NAUT_API_KEY is not set")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ENRICH_MODE = os.getenv("ENRICH_MODE", "reddit").strip().lower()
 INPUT_FILE = os.getenv("ENRICH_INPUT", os.path.join(BASE_DIR, "thousand_users_raw.jsonl"))
 OUTPUT_FILE = os.getenv("ENRICH_OUTPUT", os.path.join(BASE_DIR, "thousand_users_pvq_enriched.jsonl"))
+if ENRICH_MODE == "nemotron" and "ENRICH_INPUT" not in os.environ:
+    INPUT_FILE = os.path.join(BASE_DIR, "personas_axis_a_nemotron_k100.jsonl")
+if ENRICH_MODE == "nemotron" and "ENRICH_OUTPUT" not in os.environ:
+    OUTPUT_FILE = os.path.join(BASE_DIR, "personas_axis_a_nemotron_k100_pvq_sidecar.jsonl")
 
 TRAIN_SIZE = int(os.getenv("TRAIN_SIZE", "50"))
 VAL_SIZE = int(os.getenv("VAL_SIZE", "50"))
@@ -466,6 +476,172 @@ def administer_pvq_to_user_text(user_id, user_text, quote_signals=None):
 
 
 # ---------------------------------------------------------------------------
+# Diagnostic: PVQ-40 on Nemotron synthetic profiles (not register-matched)
+# ---------------------------------------------------------------------------
+
+def nemotron_row_id(data):
+    """Stable id from persona / person fields."""
+    persona = data.get("persona") or {}
+    person = data.get("person") or {}
+    return (
+        persona.get("id")
+        or person.get("uuid")
+        or person.get("email_address")
+        or None
+    )
+
+
+def render_nemotron_profile_text(data):
+    """Build PVQ conditioning text from synthetic profile fields only.
+
+    Prefer persona_yaml; fall back to a compact demographics + style sketch.
+    This is a different register than Reddit USER-turn corpora.
+    """
+    yaml_text = (data.get("persona_yaml") or "").strip()
+    if yaml_text:
+        return yaml_text
+
+    person = data.get("person") or {}
+    persona = data.get("persona") or {}
+    demo = persona.get("demographics") or ""
+    style = persona.get("communication_style") or {}
+    utterances = style.get("example_utterances") or []
+    parts = [
+        f"Demographics: {demo}" if demo else "",
+        f"Age: {person.get('age')}; sex: {person.get('sex')}; "
+        f"occupation: {person.get('occupation')}; "
+        f"education: {person.get('education_level')}; "
+        f"city: {person.get('city')}, {person.get('state')}",
+        f"Formality: {style.get('formality')}",
+        f"Vocabulary: {style.get('vocabulary_and_lexicon')}",
+        f"Sentence structure: {style.get('sentence_structure')}",
+    ]
+    if utterances:
+        parts.append("Example utterances:\n" + "\n".join(f"- {u}" for u in utterances))
+    return "\n".join(p for p in parts if p).strip()
+
+
+@retry_with_backoff()
+def administer_pvq_to_profile_text(user_id, profile_text):
+    """Administer PVQ-40 conditioned on a synthetic persona profile description.
+
+    Diagnostic-only. Do not treat these vectors as commensurate with Reddit
+    behavioral-text PVQ without an explicit register caveat.
+    """
+    if MOCK_LLM:
+        item_scores = {str(i): 1 + ((i + len(user_id)) % 6) for i in range(1, 41)}
+        pvq_item_scores, pvq_value_means, target_vector = score_pvq_assignment(item_scores)
+        return {
+            "pvq_item_scores": pvq_item_scores,
+            "pvq_value_means": pvq_value_means,
+            "target_vector": target_vector,
+        }
+
+    prompt = (
+        "You are participating in a psychology study as the person described in "
+        "the synthetic persona profile below (not real behavioral posts).\n"
+        "Infer how this person would prioritize values from the profile text only.\n\n"
+        f"PERSONA PROFILE FOR {user_id}:\n{profile_text[:6000]}\n\n"
+        "Below are descriptions of people. For each item, answer: how much like "
+        "this person is this description?\n\n"
+        "Rating scale:\n"
+        "1 = Not like this person at all\n"
+        "2 = Not like this person\n"
+        "3 = A little like this person\n"
+        "4 = Somewhat like this person\n"
+        "5 = Like this person\n"
+        "6 = Very much like this person\n\n"
+        f"PVQ-40 ITEMS:\n{pvq_survey_text()}\n\n"
+        "Return only a valid JSON object mapping item number strings to integer "
+        "scores for all 40 items, for example: "
+        '{"1": 4, "2": 1, ... "40": 5}'
+    )
+    resp = client.chat.completions.create(
+        model="gpt-oss", messages=[{"role": "user", "content": prompt}]
+    )
+    item_scores = extract_json(resp.choices[0].message.content)
+    if not item_scores:
+        return None
+    try:
+        pvq_item_scores, pvq_value_means, target_vector = score_pvq_assignment(item_scores)
+    except ValueError as exc:
+        print(f"  -> {user_id}: invalid PVQ response ({exc})")
+        return None
+    return {
+        "pvq_item_scores": pvq_item_scores,
+        "pvq_value_means": pvq_value_means,
+        "target_vector": target_vector,
+    }
+
+
+def enrich_nemotron():
+    """Diagnostic sidecar: PVQ from Nemotron synthetic profiles.
+
+    Input rows: {person, persona, persona_yaml} from persona_pipeline_datadesigner.
+    Output rows keep id + PVQ fields + provenance; not merged into Reddit enrich.
+    """
+    print(
+        f"Starting Nemotron PVQ diagnostic: {INPUT_FILE} -> {OUTPUT_FILE} "
+        f"(MOCK_LLM={MOCK_LLM}); register=synthetic_profile (NOT Reddit-matched)"
+    )
+    existing = set()
+    if os.path.exists(OUTPUT_FILE):
+        with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    existing.add(json.loads(line)["user_id"])
+                except Exception:
+                    pass
+        print(f"Resuming: {len(existing)} personas already scored.")
+
+    enriched_count = len(existing)
+    with open(INPUT_FILE, "r", encoding="utf-8") as fin, \
+            open(OUTPUT_FILE, "a", encoding="utf-8") as fout:
+        for line in fin:
+            if enriched_count >= MAX_USERS:
+                print(f"Reached MAX_USERS={MAX_USERS}, stopping.")
+                break
+            line = line.strip()
+            if not line:
+                continue
+            data = json.loads(line)
+            user_id = nemotron_row_id(data)
+            if not user_id or user_id in existing:
+                continue
+
+            try:
+                profile_text = render_nemotron_profile_text(data)
+                if not profile_text:
+                    print(f"  -> {user_id}: empty profile text, skipping.")
+                    continue
+
+                pvq_assignment = administer_pvq_to_profile_text(user_id, profile_text)
+                if not pvq_assignment:
+                    print(f"  -> {user_id}: PVQ administration failed, skipping.")
+                    continue
+
+                record = {
+                    "user_id": user_id,
+                    "source": "nemotron_synthetic_profile",
+                    "pvq_attribution_register": "synthetic_profile_description",
+                    "register_matched_to_reddit_behavioral_pvq": False,
+                    "pvq_item_scores": pvq_assignment["pvq_item_scores"],
+                    "pvq_value_means": pvq_assignment["pvq_value_means"],
+                    "target_vector": pvq_assignment["target_vector"],
+                }
+                fout.write(json.dumps(record) + "\n")
+                fout.flush()
+                enriched_count += 1
+                if enriched_count % 25 == 0:
+                    print(f"  [{enriched_count}] scored {user_id}")
+            except Exception as e:
+                print(f"  -> {user_id}: unexpected error ({type(e).__name__}: {e}), skipping.")
+                continue
+
+    print("Nemotron PVQ diagnostic done.")
+
+
+# ---------------------------------------------------------------------------
 # Main enrichment loop
 # ---------------------------------------------------------------------------
 
@@ -580,6 +756,13 @@ def split_into_train_val_test():
 
 
 if __name__ == "__main__":
-    enrich()
-    if os.getenv("SPLIT_ENRICHED"):
-        split_into_train_val_test()
+    if ENRICH_MODE == "nemotron":
+        enrich_nemotron()
+    elif ENRICH_MODE == "reddit":
+        enrich()
+        if os.getenv("SPLIT_ENRICHED"):
+            split_into_train_val_test()
+    else:
+        raise SystemExit(
+            f"Unknown ENRICH_MODE={ENRICH_MODE!r}; expected 'reddit' or 'nemotron'."
+        )

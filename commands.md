@@ -398,59 +398,80 @@ Two orthogonal axes per (task) record: `terminal_state` (persona satisfaction, N
 `state_requirements_met` (0/1 objective) + `satisfaction_cumulative/_worst_case/_mean/_final`
 + `satisfaction_per_turn[]`. See `STATE-Bench/instruction.md` for the full design.
 
+---
 
+# MCTS Phase-1 (persona-sampled eval) — unofficial collection
 
-PARNTER PROMPT: _SYSTEM_PROMPT = “”"\
-You are evaluating how a user’s emotion changes after a single interaction step.
-The user’s INTERNAL MONOLOGUE reflects their true thoughts and feelings.
----
-# INPUT
-You are given:
-- the user’s goal
-- the assistant’s previous response
-- the user’s INTERNAL MONOLOGUE after that response
----
-# TASK
-Determine how the user’s emotion changed as a result of the assistant’s response.
----
-# OUTPUT
-Return:
-emotion_delta ∈ [-10, +10]
----
-# GUIDELINES
-Base your judgment primarily on the INTERNAL MONOLOGUE.
-Interpret the monologue as the user’s reaction to the assistant’s response.
-Use the following scale consistently:
-- No emotional change → 0
-- Mild reaction (slight concern, mild satisfaction) → ±1 to ±3
-- Moderate reaction (noticeable concern, annoyance, appreciation) → ±4 to ±6
-- Strong emotion (frustration, relief, disappointment) → ±7 to ±9
-- Very strong emotion (e.g., “unacceptable”, escalation, demanding supervisor) → ±9 to ±10
-CRITICAL:
-- Strong emotional language MUST produce large magnitude deltas (≥ |8|)
-- Do NOT underestimate frustration or escalation signals
-- If the monologue expresses increasing frustration, assign a negative delta
-- If it expresses relief or satisfaction, assign a positive delta
-- If the monologue contains only planning or neutral reasoning, assign 0 or a very small delta
----
-# IMPORTANT
-- Do NOT consider any future conversation
-- Do NOT try to maintain or infer an absolute score
-- Only estimate the CHANGE in emotion at this step
----
-# RESPONSE FORMAT
-{
-  “emotion_delta”: <number>,
-  “feeling”: “<brief explanation grounded in the internal monologue>”
-}“”"
+Shared assignment + dual-bench runner under `eval/mcts/`. Emits **core** `rollouts_core.jsonl`
+(no `satisfaction_*`; partner can enrich later). STATE-Bench path is the same unofficial
+Nautilus stack as `run_unofficial` / `run_all_personas` (not the locked GPT-5.4 judge).
 
+## Assignment (once)
 
-<!-- 
-uv run python -m state_bench.scripts.run_unofficial \
-  --domain $DOMAIN \
-  --task $TASKS \
-  --persona-dir ../reddit/.personas_yaml_cache_personas_axis_a_reddit_schwartz_unopt_k100 \
-  --sim-model gemma \
-  --agent-model gpt-oss \
+```bash
+cd ~/multiagent_human_worker
+python eval/mcts/generate_assignment.py --bench both
+python eval/mcts/validate_assignment.py
+```
+
+## Dry-run smoke (both benches)
+
+```bash
+cd ~/multiagent_human_worker
+
+# tau2 — use tau2-bench venv (or any env with `tau2` on PATH)
+python eval/mcts/run_mcts.py --bench tau2 --domain retail --models gpt-oss --sim-model gemma \
+  --arms fixed_prompt value_only \
+  --arm-jsonl value_only=reddit/AblationPersonas/value_only_personas_opt.jsonl \
+  --arm-jsonl fixed_prompt= \
+  --limit-tasks 2 --limit-personas-per-task 2 --dry-run --skip-existing
+
+# STATE-Bench — MUST use STATE-Bench uv env (repo-root .venv lacks azure-identity)
+uv run --project STATE-Bench python eval/mcts/run_mcts.py \
+  --bench statebench --domain travel --models gpt-oss --sim-model gemma \
+  --arms fixed_prompt value_only \
+  --arm-jsonl value_only=reddit/AblationPersonas/value_only_personas_opt.jsonl \
+  --arm-jsonl fixed_prompt= \
   --no-satisfaction \
-  --output-dir outputs/${DOMAIN}_persona_k100  -->
+  --limit-tasks 2 --limit-personas-per-task 2 --dry-run --skip-existing
+```
+
+## Real unofficial runs (`--confirm`)
+
+`--no-satisfaction` is the **default** for STATE-Bench (skip turn-level critic). Pass
+`--with-satisfaction` only if you want the critic inline. Tau2 has no satisfaction critic;
+`--no-satisfaction` is a no-op there.
+
+```bash
+cd ~/multiagent_human_worker
+set -a && source STATE-Bench/.env && set +a   # NAUT_* for statebench
+
+# --- STATE-Bench travel (unofficial, no critic) ---
+uv run --project STATE-Bench python eval/mcts/run_mcts.py \
+  --bench statebench --domain travel --models gpt-oss --sim-model gemma \
+  --arms fixed_prompt value_only \
+  --arm-jsonl value_only=reddit/AblationPersonas/value_only_personas_opt.jsonl \
+  --arm-jsonl fixed_prompt= \
+  --no-satisfaction \
+  --eval-dir reddit/Eval/mcts_phase1 \
+  --confirm --skip-existing
+
+# --- tau2 retail (unofficial Nautilus agent/sim; same assignment file) ---
+# Activate tau2-bench venv first if needed:  source tau2-bench/.venv/bin/activate
+python eval/mcts/run_mcts.py \
+  --bench tau2 --domain retail --models gpt-oss --user-llm openai/gemma \
+  --arms fixed_prompt value_only \
+  --arm-jsonl value_only=reddit/AblationPersonas/value_only_personas_opt.jsonl \
+  --arm-jsonl fixed_prompt= \
+  --eval-dir reddit/Eval/mcts_phase1 \
+  --confirm --skip-existing
+```
+
+Add more arms when JSONLs exist, e.g. `--arms fixed_prompt value_only behavior_only` and
+`--arm-jsonl behavior_only=reddit/AblationPersonas/behavior_only_optimized_personas.jsonl`.
+
+Schema check:
+
+```bash
+python eval/mcts/check_schema.py reddit/Eval/mcts_phase1/rollouts_core.jsonl
+```
