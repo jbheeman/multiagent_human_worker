@@ -316,30 +316,44 @@ def make_model_configs():
     gen_parallel = int(os.getenv("GEN_PARALLEL", "1"))
     critic_parallel = int(os.getenv("CRITIC_PARALLEL", "1"))
     critic_fast_parallel = int(os.getenv("CRITIC_FAST_PARALLEL", os.getenv("CRITIC_PARALLEL", "1")))
+    # NRP/ellm can stall on long critic/gen calls; default 20 min (same as pipeline.py).
+    api_timeout = int(os.getenv("DD_API_TIMEOUT_SEC", "1200"))
     return [
         ModelConfig(
             alias=GENERATOR_ALIAS,
             model=os.getenv("GEN_MODEL", "gpt-oss"),
             provider=PROVIDER_NAME,
-            inference_parameters=ChatCompletionInferenceParams(max_parallel_requests=gen_parallel),
+            inference_parameters=ChatCompletionInferenceParams(
+                max_parallel_requests=gen_parallel,
+                timeout=api_timeout,
+            ),
         ),
         ModelConfig(
             alias=CRITIC_ALIAS,
             model=os.getenv("CRITIC_MODEL", "minimax-m2"),
             provider=PROVIDER_NAME,
-            inference_parameters=ChatCompletionInferenceParams(max_parallel_requests=critic_parallel),
+            inference_parameters=ChatCompletionInferenceParams(
+                max_parallel_requests=critic_parallel,
+                timeout=api_timeout,
+            ),
         ),
         ModelConfig(
             alias=CRITIC_FAST_ALIAS,
             model=os.getenv("CRITIC_FAST_MODEL", "minimax-m2"),
             provider=PROVIDER_NAME,
-            inference_parameters=ChatCompletionInferenceParams(max_parallel_requests=critic_fast_parallel),
+            inference_parameters=ChatCompletionInferenceParams(
+                max_parallel_requests=critic_fast_parallel,
+                timeout=api_timeout,
+            ),
         ),
         ModelConfig(
             alias=NEMOTRON_ALIAS,
             model=os.getenv("NEMOTRON_MODEL", "gpt-oss"),
             provider=PROVIDER_NAME,
-            inference_parameters=ChatCompletionInferenceParams(max_parallel_requests=gen_parallel),
+            inference_parameters=ChatCompletionInferenceParams(
+                max_parallel_requests=gen_parallel,
+                timeout=api_timeout,
+            ),
         ),
     ]
 
