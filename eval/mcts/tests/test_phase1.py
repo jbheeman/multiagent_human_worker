@@ -6,6 +6,7 @@ import unittest
 from collections import Counter
 from random import Random
 
+from eval.mcts.api_errors import is_external_api_error
 from eval.mcts.assignment import AssignmentRow, hamilton_quotas, snake_draft, validate_assignment
 from eval.mcts.ids import persona_id_from_row
 from eval.mcts.schema import build_core_record, make_run_id, validate_core_record
@@ -16,6 +17,26 @@ from eval.mcts.schwartz import (
     parse_schwartz_vector,
 )
 from eval.mcts.terminal import map_statebench_terminal, map_tau2_terminal
+
+
+class TestApiErrors(unittest.TestCase):
+    def test_external_api_errors_detected(self):
+        self.assertTrue(is_external_api_error("APIConnectionError: Connection error."))
+        self.assertTrue(is_external_api_error("APITimeoutError: Request timed out."))
+        self.assertTrue(
+            is_external_api_error(
+                "NotFoundError: No matching route found. It is likely that the model "
+                "specified your request is not configured in the Gateway."
+            )
+        )
+        # Agent/logic failures must still persist so they are not silently retried forever.
+        self.assertFalse(
+            is_external_api_error(
+                "ValueError: BaseAgent requested disallowed tool: search_flights"
+            )
+        )
+        self.assertFalse(is_external_api_error(None))
+        self.assertFalse(is_external_api_error(""))
 
 
 class TestIds(unittest.TestCase):

@@ -163,7 +163,7 @@ def main() -> None:
         satisfaction_client = None if args.no_satisfaction else client_class.from_env(model=args.satisfaction_model)
         agent_class = load_root_agent_class("NautilusAgent")
         for model in args.models:
-            agent_clients[model] = client_class.from_env(model=model)
+            agent_clients[model] = client_class.from_env(model=model, role="agent")
 
     planned = done = 0
     for model in args.models:

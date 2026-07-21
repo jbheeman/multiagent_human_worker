@@ -69,16 +69,27 @@ class NautilusClient(BaseLLMClient):
         self._model = model
 
     @classmethod
-    def from_env(cls, *, model: str | None = None) -> NautilusClient:
+    def from_env(cls, *, model: str | None = None, role: str = "default") -> NautilusClient:
+        """Build a client from NAUT_* env vars.
+
+        role:
+          - "agent": prefer NAUT_AGENT_API_BASE (e.g. local vLLM), else NAUT_API_BASE
+          - "default" / "sim" / anything else: NAUT_API_BASE (sim, judge, critic)
+        """
         verify_raw = os.environ.get("NAUT_VERIFY_SSL", "false").strip().lower()
         verify_ssl = verify_raw in {"1", "true", "yes"}
         api_key = os.environ.get("NAUT_API_KEY")
         if not api_key:
             raise ValueError("NAUT_API_KEY is required for NautilusClient")
+        default_base = os.environ.get("NAUT_API_BASE", "https://ellm.nrp-nautilus.io/v1")
+        if role == "agent":
+            base_url = os.environ.get("NAUT_AGENT_API_BASE") or default_base
+        else:
+            base_url = default_base
         return cls(
             api_key=api_key,
             model=model or os.environ.get("NAUT_MODEL", "kimi"),
-            base_url=os.environ.get("NAUT_API_BASE", "https://ellm.nrp-nautilus.io/v1"),
+            base_url=base_url,
             verify_ssl=verify_ssl,
         )
 

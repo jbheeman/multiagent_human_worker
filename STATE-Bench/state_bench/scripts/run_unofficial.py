@@ -194,7 +194,7 @@ def main() -> None:
     tasks = _resolve_tasks(args.domain, args.task)
 
     client_class = load_root_client_class("NautilusClient")
-    agent_client = client_class.from_env(model=args.agent_model)
+    agent_client = client_class.from_env(model=args.agent_model, role="agent")
     sim_client = client_class.from_env(model=args.sim_model)
     if not isinstance(agent_client, BaseLLMClient):
         raise TypeError("NautilusClient.from_env() must return a BaseLLMClient")

@@ -15,6 +15,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from eval.mcts.api_errors import is_external_api_error  # noqa: E402
 from eval.mcts.assignment import AssignmentRow, read_assignment_csv  # noqa: E402
 from eval.mcts.backends.statebench import StateBenchBackend  # noqa: E402
 from eval.mcts.backends.tau2 import Tau2Backend  # noqa: E402
@@ -367,7 +368,7 @@ def main() -> None:
 
     completed = load_completed_run_ids(rollouts_jsonl) if args.skip_existing else {}
     cache_root = eval_dir / ".persona_yaml_cache"
-    planned = skipped = ran = errors = 0
+    planned = skipped = ran = errors = api_errors = 0
 
     for model in models:
         for arm_name, arm_index in arm_indexes.items():
@@ -444,6 +445,13 @@ def main() -> None:
                     ran += 1
                     continue
 
+                if is_external_api_error(result.error):
+                    # Log + count only; do not write JSONL so --skip-existing can retry.
+                    api_errors += 1
+                    errors += 1
+                    print(f"[api-err] {run_id}: {result.error}", file=sys.stderr)
+                    continue
+
                 record = build_core_record(
                     bench=bench,
                     config_hash=config_hash,
@@ -486,7 +494,7 @@ def main() -> None:
 
     print(
         f"Done. planned_or_ran={ran} skipped={skipped} errors={errors} "
-        f"jsonl={rollouts_jsonl}"
+        f"api_errors={api_errors} jsonl={rollouts_jsonl}"
     )
     if errors and not args.dry_run:
         sys.exit(1)

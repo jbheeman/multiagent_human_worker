@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from eval.mcts.api_errors import is_external_api_error
 from eval.mcts.backends import RolloutRequest, RolloutResult
 from eval.mcts.backends.base import to_fs_label
 from eval.mcts.terminal import map_statebench_terminal
@@ -54,7 +55,7 @@ class StateBenchBackend:
     def _get_clients(self, model: str, sim_model: str, *, with_satisfaction: bool):
         self._ensure_imports()
         if model not in self._agent_clients:
-            self._agent_clients[model] = self._client_class.from_env(model=model)
+            self._agent_clients[model] = self._client_class.from_env(model=model, role="agent")
         if sim_model not in self._sim_clients:
             self._sim_clients[sim_model] = self._client_class.from_env(model=sim_model)
         satisfaction_client = None
@@ -155,6 +156,18 @@ class StateBenchBackend:
             )
         except Exception as exc:  # noqa: BLE001
             err = f"{type(exc).__name__}: {exc}"
+            if is_external_api_error(err):
+                # Do not persist — leave slot free for --skip-existing rerun.
+                return RolloutResult(
+                    terminal_state="sim_error",
+                    task_success=False,
+                    transfer=False,
+                    n_turns=0,
+                    full_transcript=[],
+                    artifact_path=None,
+                    error=err,
+                    raw={"sim_seed_unsupported": True, "skipped_persist": True},
+                )
             payload = {
                 "task_id": req.task_id,
                 "error": err,
@@ -171,6 +184,18 @@ class StateBenchBackend:
                 artifact_path=dest_path,
                 error=err,
                 raw={"sim_seed_unsupported": True},
+            )
+
+        if is_external_api_error(traj.error):
+            return RolloutResult(
+                terminal_state="sim_error",
+                task_success=False,
+                transfer=False,
+                n_turns=0,
+                full_transcript=[],
+                artifact_path=None,
+                error=traj.error,
+                raw={"sim_seed_unsupported": True, "skipped_persist": True},
             )
 
         sim = traj.to_dict()
