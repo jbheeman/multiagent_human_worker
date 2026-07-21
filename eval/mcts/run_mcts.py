@@ -113,39 +113,44 @@ def _leading_num(task_id: str) -> int:
 def filter_assignment_rows(
     rows: list[AssignmentRow],
     *,
-    domain: str,
+    domain: str | None,
     task_ids: set[str] | None,
     persona_ids: set[str] | None,
     limit_tasks: int | None,
     limit_personas_per_task: int | None,
 ) -> list[AssignmentRow]:
-    filtered = [r for r in rows if r.domain == domain]
+    if domain is None or domain.lower() in {"all", "*", "any"}:
+        filtered = list(rows)
+    else:
+        filtered = [r for r in rows if r.domain == domain]
     if task_ids is not None:
         filtered = [r for r in filtered if r.task_id in task_ids]
     if persona_ids is not None:
         filtered = [r for r in filtered if r.persona_id in persona_ids]
 
     # Stable numeric-ish task order (tau2 "0","1",... and statebench "1-foo","2-bar").
-    filtered.sort(key=lambda r: (_leading_num(r.task_id), r.task_id, r.slot))
+    filtered.sort(key=lambda r: (r.domain, _leading_num(r.task_id), r.task_id, r.slot))
 
     if limit_tasks is not None:
         seen: list[str] = []
         for r in filtered:
-            if r.task_id not in seen:
-                seen.append(r.task_id)
+            task_key = f"{r.domain}:{r.task_id}"
+            if task_key not in seen:
+                seen.append(task_key)
             if len(seen) >= limit_tasks:
                 break
         keep = set(seen[:limit_tasks])
-        filtered = [r for r in filtered if r.task_id in keep]
+        filtered = [r for r in filtered if f"{r.domain}:{r.task_id}" in keep]
 
     if limit_personas_per_task is not None:
         per_task: dict[str, int] = {}
         kept: list[AssignmentRow] = []
         for r in filtered:
-            n = per_task.get(r.task_id, 0)
+            task_key = f"{r.domain}:{r.task_id}"
+            n = per_task.get(task_key, 0)
             if n < limit_personas_per_task:
                 kept.append(r)
-                per_task[r.task_id] = n + 1
+                per_task[task_key] = n + 1
         filtered = kept
 
     return filtered
@@ -376,7 +381,7 @@ def main() -> None:
                 run_id = make_run_id(
                     bench=bench,
                     block=block,
-                    domain=domain,
+                    domain=row.domain,
                     task_id=row.task_id,
                     persona_id=row.persona_id,
                     arm=arm_name,
@@ -402,7 +407,7 @@ def main() -> None:
 
                 req = RolloutRequest(
                     bench=bench,
-                    domain=domain,
+                    domain=row.domain,
                     task_id=row.task_id,
                     persona_id=row.persona_id,
                     arm=arm_name,
@@ -424,7 +429,7 @@ def main() -> None:
                         bench=bench,
                         config_hash=config_hash,
                         block=block,
-                        domain=domain,
+                        domain=row.domain,
                         task_id=row.task_id,
                         persona_id=row.persona_id,
                         arm=arm_name,
@@ -456,7 +461,7 @@ def main() -> None:
                     bench=bench,
                     config_hash=config_hash,
                     block=block,
-                    domain=domain,
+                    domain=row.domain,
                     task_id=row.task_id,
                     persona_id=row.persona_id,
                     arm=arm_name,
