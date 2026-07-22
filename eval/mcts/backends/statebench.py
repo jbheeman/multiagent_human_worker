@@ -9,7 +9,7 @@ from typing import Any
 
 from eval.mcts.api_errors import is_external_api_error
 from eval.mcts.backends import RolloutRequest, RolloutResult
-from eval.mcts.backends.base import to_fs_label
+from eval.mcts.backends.base import artifact_path, to_fs_label
 from eval.mcts.terminal import map_statebench_terminal
 
 
@@ -81,8 +81,15 @@ class StateBenchBackend:
             if req.persona_yaml_path is not None
             else f"baseline__{to_fs_label(req.persona_id)}"
         )
-        model_dir = req.eval_dir / model_label / req.arm
-        dest_path = model_dir / f"{persona_key}_{model_label}_{req.domain}_{req.task_id}.json"
+        dest_path = artifact_path(
+            req.eval_dir,
+            model=req.model,
+            domain=req.domain,
+            arm=req.arm,
+            persona_key=persona_key,
+            task_id=req.task_id,
+        )
+        model_dir = dest_path.parent
 
         if req.dry_run:
             print(f"[statebench dry-run] model={req.model} persona={persona_key} task={req.task_id}")

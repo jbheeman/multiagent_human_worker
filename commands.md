@@ -456,13 +456,22 @@ uv run --project STATE-Bench python eval/mcts/run_mcts.py \
   --eval-dir reddit/Eval/mcts_phase1 \
   --confirm --skip-existing
 
-# --- tau2 retail (unofficial Nautilus agent/sim; same assignment file) ---
-# Activate tau2-bench venv first if needed:  source tau2-bench/.venv/bin/activate
+# --- tau2 retail (same NAUT_* split as STATE-Bench) ---
+# Identical endpoint pattern to statebench:
+#   NAUT_API_BASE        → user-sim (local gemma)
+#   NAUT_AGENT_API_BASE  → agent (Nautilus gpt-oss)
+#   NAUT_API_KEY         → from STATE-Bench/.env (auto-loaded)
+cd ~/multiagent_human_worker
+source .venv/bin/activate
+NAUT_API_BASE=http://localhost:8000/v1 \
+NAUT_AGENT_API_BASE=https://ellm.nrp-nautilus.io/v1 \
 python eval/mcts/run_mcts.py \
-  --bench tau2 --domain retail --models gpt-oss --user-llm openai/gemma \
-  --arms fixed_prompt value_only \
-  --arm-jsonl value_only=reddit/AblationPersonas/value_only_personas_opt.jsonl \
-  --arm-jsonl fixed_prompt= \
+  --bench tau2 --domain retail \
+  --assignment-csv eval/mcts/assignments/assignment_block1.csv \
+  --models gpt-oss \
+  --user-llm openai/gemma4-26b-uncensored \
+  --arms full_gepa \
+  --arm-jsonl full_gepa=reddit/AblationPersonas/full_arm_optimized_personas.jsonl \
   --eval-dir reddit/Eval/mcts_phase1 \
   --confirm --skip-existing
 ```

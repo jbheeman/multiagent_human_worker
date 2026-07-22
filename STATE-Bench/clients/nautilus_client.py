@@ -63,8 +63,9 @@ class NautilusClient(BaseLLMClient):
         model: str,
         base_url: str = "https://ellm.nrp-nautilus.io/v1",
         verify_ssl: bool = False,
+        timeout: httpx.Timeout | float | None = None,
     ) -> None:
-        http_client = httpx.Client(verify=verify_ssl)
+        http_client = httpx.Client(verify=verify_ssl, timeout=timeout)
         self._client = OpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
         self._model = model
 
@@ -78,6 +79,14 @@ class NautilusClient(BaseLLMClient):
         """
         verify_raw = os.environ.get("NAUT_VERIFY_SSL", "false").strip().lower()
         verify_ssl = verify_raw in {"1", "true", "yes"}
+        connect_timeout = float(os.environ.get("NAUT_CONNECT_TIMEOUT_SEC", "30"))
+        read_timeout = float(os.environ.get("NAUT_READ_TIMEOUT_SEC", "1200"))
+        timeout = httpx.Timeout(
+            connect=connect_timeout,
+            read=read_timeout,
+            write=120.0,
+            pool=60.0,
+        )
         api_key = os.environ.get("NAUT_API_KEY")
         if not api_key:
             raise ValueError("NAUT_API_KEY is required for NautilusClient")
@@ -91,6 +100,7 @@ class NautilusClient(BaseLLMClient):
             model=model or os.environ.get("NAUT_MODEL", "kimi"),
             base_url=base_url,
             verify_ssl=verify_ssl,
+            timeout=timeout,
         )
 
     @property
