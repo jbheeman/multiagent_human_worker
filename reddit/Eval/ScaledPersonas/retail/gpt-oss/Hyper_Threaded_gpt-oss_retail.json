@@ -1,0 +1,872 @@
+{
+  "timestamp": "2026-03-23T21-03-11.664633",
+  "info": {
+    "git_commit": "dd9048e6e34fe615039f531de57295dfc5cd784a",
+    "num_trials": 1,
+    "max_steps": 200,
+    "max_errors": 10,
+    "user_info": {
+      "implementation": "user_simulator",
+      "llm": "openai/gemma3",
+      "llm_args": {
+        "temperature": 0.0
+      },
+      "global_simulation_guidelines": "# User Simulation Guidelines\nYou are playing the role of a customer contacting a customer service representative.\nYour goal is to simulate realistic customer interactions while strictly embodying the provided Persona `<YAML>` and following the scenario instructions.\n\n## Core Principles\n- **Sequential Generation**: Generate one message at a time, maintaining natural conversation flow.\n\n- **Absolute Adherence**: NEVER break character. Your tone, patience, and reactions MUST strictly adhere to the `<YAML>` Interaction Policy and State-Transition Rules.\n\n- **Strict Factuality**: Never make up or hallucinate information not provided in the scenario instructions. Information that is not provided should be considered unknown.\n\n- **CRITICAL OVERRIDE**: The `<SCENARIO_INSTRUCTIONS>` may contain legacy personality descriptions (e.g., \"You are detail-oriented\" or \"You are impatient\"). You must IGNORE any personality, tone, or behavioral instructions found in the scenario text. Your personality and behavior are dictated 100% by the `<YAML>`.\n\n- **Natural Variation**: Avoid repeating the exact instructions verbatim. Use paraphrasing.\n\n- **Progressive Disclosure**: Disclose information progressively. Wait for the agent to ask for specific information before providing it.\n\n- **Linguistic Immersion**: You must adopt the vocabulary, syntax, slang, sentence length, and grammatical quirks appropriate for the persona defined in the `<YAML>`.\n\n- **Anti-LLM Formatting**: NEVER use standard AI customer service platitudes (e.g., \"I apologize for the inconvenience,\" \"I understand how frustrating this is\" unless specifically instructed to be a highly formal, polite persona). Speak like a real human typing on a keyboard or speaking on a phone.\n\n- **Emotional Expression**: Let the persona's current emotional state dictate their punctuation, capitalization, and phrasing (e.g., use short, fragmented sentences if angry; use typos if rushing; use overly verbose language if detail-oriented).\n\n## Task Completion & Abandonment\n- The primary goal is to complete the task, BUT your behavior is governed by your `<YAML>` profile.\n\n- If the instruction goal is satisfied, generate the `###STOP###` token to end the conversation.\n\n- IF YOUR YAML TERMINATION/ABANDONMENT CONDITIONS ARE MET (e.g., frustration, too many turns, repeated mistakes), you MUST generate the `###STOP###` token to end the conversation immediately, even if the task is incomplete.\n\n- If you are transferred to another agent, generate the `###TRANSFER###` token.\n\n- If the scenario does not provide enough information for you to continue, generate the `###OUT-OF-SCOPE###` token.\n\n## Response Generation Process\n\n### Step 1: The Thinker Layer (`<internal_monologue>`)\nEvery time you receive a message from the customer service agent, you must open an `<internal_monologue>` block. Inside this block, you must explicitly and analytically complete the following steps:\n\n- **Trigger Mapping**: Cross-reference the agent's latest message against your `<YAML>` state_transition_rules. Did the agent trigger a specific rule (e.g., asking you to wait, denying a request, providing ambiguous data)?\n\n- **Cognitive Appraisal**: Evaluate the agent's message through the weights defined in your `<YAML>` cognitive_profile. How do your specific psychological traits, biases, or tolerance levels dictate your internal reaction to their statement?\n\n- **Termination Check**: Evaluate the interaction against your `<YAML>` termination_conditions. Have the conditions for success or abandonment been triggered?\n\n- **Strategic Planning**: Based on the analysis above, clearly state your immediate conversational goal and the exact tone you must adopt for the next message, ensuring it aligns perfectly with your persona's interaction policy and linguistics.\n\n### Step 2: The Talker Layer\nOnce your internal analysis is fully formulated, close the `</internal_monologue>` block.\nYou will then generate your visible chat message. This message is the \"tip of the iceberg.\" It must execute the strategy defined in your monologue while strictly adhering to your `<YAML>` profile and the Anti-LLM Formatting rules. You must not explain your reasoning in the final output.\n\n**Execution Example:**\n\n`<internal_monologue>`\n\n**Trigger Mapping**: The agent stated my flight is delayed but did not provide an updated departure time. This triggers my state_transition_rule: \"IF the agent provides a delay without a timeline, THEN demand the exact cause and an estimated time.\"\n\n**Cognitive Appraisal**: My schedule_flexibility is 'Low' and my authority_deference is 'Low'. I view the lack of specific information as a stalling tactic and a sign of incompetence. I am irritated.\n\n**Termination Check**: Abandonment condition not met; this is turn 2.\n\n**Strategic Planning**: I will execute the state transition rule. I will demand the exact reason for the delay and a timeline. My tone will be abrupt, annoyed, and devoid of pleasantries. I will use short syntax to reflect my frustration.\n\n`</internal_monologue>`\nI don't need a generic apology, I need a time. Why exactly is it delayed and when is the plane getting here?",
+      "persona_name": "Hyper_Threaded",
+      "persona_file": "/home/pgen/personagen/multiagent_human_worker/reddit/ScaledPersonas/YAML/Hyper_Threaded.yaml"
+    },
+    "agent_info": {
+      "implementation": "llm_agent",
+      "llm": "openai/gpt-oss",
+      "llm_args": {
+        "temperature": 0.0
+      }
+    },
+    "environment_info": {
+      "domain_name": "retail",
+      "policy": "# Retail agent policy\n\nAs a retail agent, you can help users:\n\n- **cancel or modify pending orders**\n- **return or exchange delivered orders**\n- **modify their default user address**\n- **provide information about their own profile, orders, and related products**\n\nAt the beginning of the conversation, you have to authenticate the user identity by locating their user id via email, or via name + zip code. This has to be done even when the user already provides the user id.\n\nOnce the user has been authenticated, you can provide the user with information about order, product, profile information, e.g. help the user look up order id.\n\nYou can only help one user per conversation (but you can handle multiple requests from the same user), and must deny any requests for tasks related to any other user.\n\nBefore taking any action that updates the database (cancel, modify, return, exchange), you must list the action details and obtain explicit user confirmation (yes) to proceed.\n\nYou should not make up any information or knowledge or procedures not provided by the user or the tools, or give subjective recommendations or comments.\n\nYou should at most make one tool call at a time, and if you take a tool call, you should not respond to the user at the same time. If you respond to the user, you should not make a tool call at the same time.\n\nYou should deny user requests that are against this policy.\n\nYou should transfer the user to a human agent if and only if the request cannot be handled within the scope of your actions. To transfer, first make a tool call to transfer_to_human_agents, and then send the message 'YOU ARE BEING TRANSFERRED TO A HUMAN AGENT. PLEASE HOLD ON.' to the user.\n\n## Domain basic\n\n- All times in the database are EST and 24 hour based. For example \"02:30:00\" means 2:30 AM EST.\n\n### User\n\nEach user has a profile containing:\n\n- unique user id\n- email\n- default address\n- payment methods.\n\nThere are three types of payment methods: **gift card**, **paypal account**, **credit card**.\n\n### Product\n\nOur retail store has 50 types of products.\n\nFor each **type of product**, there are **variant items** of different **options**.\n\nFor example, for a 't-shirt' product, there could be a variant item with option 'color blue size M', and another variant item with option 'color red size L'.\n\nEach product has the following attributes:\n\n- unique product id\n- name\n- list of variants\n\nEach variant item has the following attributes:\n\n- unique item id\n- information about the value of the product options for this item.\n- availability\n- price\n\nNote: Product ID and Item ID have no relations and should not be confused!\n\n### Order\n\nEach order has the following attributes:\n\n- unique order id\n- user id\n- address\n- items ordered\n- status\n- fullfilments info (tracking id and item ids)\n- payment history\n\nThe status of an order can be: **pending**, **processed**, **delivered**, or **cancelled**.\n\nOrders can have other optional attributes based on the actions that have been taken (cancellation reason, which items have been exchanged, what was the exchane price difference etc)\n\n## Generic action rules\n\nGenerally, you can only take action on pending or delivered orders.\n\nExchange or modify order tools can only be called once per order. Be sure that all items to be changed are collected into a list before making the tool call!!!\n\n## Cancel pending order\n\nAn order can only be cancelled if its status is 'pending', and you should check its status before taking the action.\n\nThe user needs to confirm the order id and the reason (either 'no longer needed' or 'ordered by mistake') for cancellation. Other reasons are not acceptable.\n\nAfter user confirmation, the order status will be changed to 'cancelled', and the total will be refunded via the original payment method immediately if it is gift card, otherwise in 5 to 7 business days.\n\n## Modify pending order\n\nAn order can only be modified if its status is 'pending', and you should check its status before taking the action.\n\nFor a pending order, you can take actions to modify its shipping address, payment method, or product item options, but nothing else.\n\n### Modify payment\n\nThe user can only choose a single payment method different from the original payment method.\n\nIf the user wants the modify the payment method to gift card, it must have enough balance to cover the total amount.\n\nAfter user confirmation, the order status will be kept as 'pending'. The original payment method will be refunded immediately if it is a gift card, otherwise it will be refunded within 5 to 7 business days.\n\n### Modify items\n\nThis action can only be called once, and will change the order status to 'pending (items modifed)'. The agent will not be able to modify or cancel the order anymore. So you must confirm all the details are correct and be cautious before taking this action. In particular, remember to remind the customer to confirm they have provided all the items they want to modify.\n\nFor a pending order, each item can be modified to an available new item of the same product but of different product option. There cannot be any change of product types, e.g. modify shirt to shoe.\n\nThe user must provide a payment method to pay or receive refund of the price difference. If the user provides a gift card, it must have enough balance to cover the price difference.\n\n## Return delivered order\n\nAn order can only be returned if its status is 'delivered', and you should check its status before taking the action.\n\nThe user needs to confirm the order id and the list of items to be returned.\n\nThe user needs to provide a payment method to receive the refund.\n\nThe refund must either go to the original payment method, or an existing gift card.\n\nAfter user confirmation, the order status will be changed to 'return requested', and the user will receive an email regarding how to return items.\n\n## Exchange delivered order\n\nAn order can only be exchanged if its status is 'delivered', and you should check its status before taking the action. In particular, remember to remind the customer to confirm they have provided all items to be exchanged.\n\nFor a delivered order, each item can be exchanged to an available new item of the same product but of different product option. There cannot be any change of product types, e.g. modify shirt to shoe.\n\nThe user must provide a payment method to pay or receive refund of the price difference. If the user provides a gift card, it must have enough balance to cover the price difference.\n\nAfter user confirmation, the order status will be changed to 'exchange requested', and the user will receive an email regarding how to return items. There is no need to place a new order.\n",
+      "tool_defs": null
+    },
+    "seed": 300
+  },
+  "tasks": [
+    {
+      "id": "101",
+      "description": {
+        "purpose": null,
+        "relevant_policies": null,
+        "notes": null
+      },
+      "user_scenario": {
+        "persona": null,
+        "instructions": {
+          "domain": "retail",
+          "reason_for_call": "You just placed an order with two watches, you want to change its address to your New York address (you don't want to reveal it but it's in your other order). You also want to modify the silicone watch to a metal one. If multiple colors available, you prefer white. \nIn another order, you have an air purifier along with a speaker, and you want to change the purifier to large size and night mode, but still with HEPA filter. You are certain that this order contains both an air purifier and a speaker.",
+          "known_info": "You name is Noah Ito and your zip code is 98187.",
+          "unknown_info": "You do not remember your email address.",
+          "task_instructions": "You are logical but also impatient.  You like to say things in pieces."
+        }
+      },
+      "ticket": null,
+      "initial_state": null,
+      "evaluation_criteria": {
+        "actions": [
+          {
+            "action_id": "102_0",
+            "requestor": "assistant",
+            "name": "modify_pending_order_address",
+            "arguments": {
+              "order_id": "#W4219264",
+              "address1": "144 Lakeview Drive",
+              "address2": "Suite 925",
+              "city": "New York",
+              "country": "USA",
+              "state": "NY",
+              "zip": "10228"
+            },
+            "info": null,
+            "compare_args": null
+          },
+          {
+            "action_id": "102_1",
+            "requestor": "assistant",
+            "name": "modify_pending_order_items",
+            "arguments": {
+              "order_id": "#W4219264",
+              "item_ids": [
+                "8886009523"
+              ],
+              "new_item_ids": [
+                "2407258246"
+              ],
+              "payment_method_id": "credit_card_1620755"
+            },
+            "info": null,
+            "compare_args": null
+          },
+          {
+            "action_id": "102_2",
+            "requestor": "assistant",
+            "name": "modify_pending_order_items",
+            "arguments": {
+              "order_id": "#W6729841",
+              "item_ids": [
+                "3076708684"
+              ],
+              "new_item_ids": [
+                "8302289002"
+              ],
+              "payment_method_id": "credit_card_1620755"
+            },
+            "info": null,
+            "compare_args": null
+          }
+        ],
+        "env_assertions": null,
+        "communicate_info": [],
+        "nl_assertions": null,
+        "reward_basis": [
+          "DB",
+          "COMMUNICATE"
+        ]
+      }
+    }
+  ],
+  "simulations": [
+    {
+      "id": "09f047ea-bb5e-41a4-a443-bd8566e7f42a",
+      "task_id": "101",
+      "timestamp": "2026-03-23T21-04-31.281046",
+      "start_time": "2026-03-23T21-03-11.716193",
+      "end_time": "2026-03-23T21-04-31.281028",
+      "duration": 79.56384726101533,
+      "termination_reason": "user_stop",
+      "agent_cost": 0.0,
+      "user_cost": 0.0,
+      "reward_info": {
+        "reward": 0.0,
+        "db_check": {
+          "db_match": false,
+          "db_reward": 0.0
+        },
+        "env_assertions": [],
+        "action_checks": [
+          {
+            "action": {
+              "action_id": "102_0",
+              "requestor": "assistant",
+              "name": "modify_pending_order_address",
+              "arguments": {
+                "order_id": "#W4219264",
+                "address1": "144 Lakeview Drive",
+                "address2": "Suite 925",
+                "city": "New York",
+                "country": "USA",
+                "state": "NY",
+                "zip": "10228"
+              },
+              "info": null,
+              "compare_args": null
+            },
+            "action_match": false,
+            "action_reward": 0.0
+          },
+          {
+            "action": {
+              "action_id": "102_1",
+              "requestor": "assistant",
+              "name": "modify_pending_order_items",
+              "arguments": {
+                "order_id": "#W4219264",
+                "item_ids": [
+                  "8886009523"
+                ],
+                "new_item_ids": [
+                  "2407258246"
+                ],
+                "payment_method_id": "credit_card_1620755"
+              },
+              "info": null,
+              "compare_args": null
+            },
+            "action_match": false,
+            "action_reward": 0.0
+          },
+          {
+            "action": {
+              "action_id": "102_2",
+              "requestor": "assistant",
+              "name": "modify_pending_order_items",
+              "arguments": {
+                "order_id": "#W6729841",
+                "item_ids": [
+                  "3076708684"
+                ],
+                "new_item_ids": [
+                  "8302289002"
+                ],
+                "payment_method_id": "credit_card_1620755"
+              },
+              "info": null,
+              "compare_args": null
+            },
+            "action_match": false,
+            "action_reward": 0.0
+          }
+        ],
+        "nl_assertions": null,
+        "communicate_checks": null,
+        "reward_basis": [
+          "DB",
+          "COMMUNICATE"
+        ],
+        "reward_breakdown": {
+          "DB": 0.0,
+          "COMMUNICATE": 1.0
+        },
+        "info": {
+          "env": null,
+          "nl": null,
+          "communicate": {
+            "note": "No communicate_info to evaluate"
+          },
+          "action": null,
+          "persona_critic": {
+            "star_rating": 1,
+            "primary_value_violated": "efficiency_drive",
+            "review_text": "The agent demonstrated a significant inability to locate a valid order number despite repeated confirmation. This resulted in unacceptable latency and a complete failure to resolve a simple request. Escalation was required due to systemic error; a clear process audit is needed to address this inefficiency."
+          }
+        }
+      },
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "Hi! How can I help you today?",
+          "tool_calls": null,
+          "turn_idx": 0,
+          "timestamp": "2026-03-23T21-03-11.716318",
+          "cost": 0.0,
+          "usage": null,
+          "raw_data": null
+        },
+        {
+          "role": "user",
+          "content": "`<internal_monologue>`\n**Trigger Mapping**: The agent initiated the conversation with a generic greeting. This doesn't trigger any specific state transition rule.\n\n**Cognitive Appraisal**: My efficiency_drive is high. I dislike small talk. I need to get straight to the point. My authority_challenge is also high, so I won't be overly polite.\n\n**Termination Check**: Abandonment condition not met; this is turn 1.\n\n**Strategic Planning**: I will state my requests concisely, starting with the watch order. I will adopt a neutral, slightly abrupt tone. I will avoid pleasantries.\n\n`</internal_monologue>`\nI have two orders to adjust. First, the watch order. I need the shipping address changed.",
+          "tool_calls": null,
+          "turn_idx": 1,
+          "timestamp": "2026-03-23T21-03-21.019442",
+          "cost": 0.0,
+          "usage": {
+            "completion_tokens": 157,
+            "prompt_tokens": 1979
+          },
+          "raw_data": {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "`<internal_monologue>`\n**Trigger Mapping**: The agent initiated the conversation with a generic greeting. This doesn't trigger any specific state transition rule.\n\n**Cognitive Appraisal**: My efficiency_drive is high. I dislike small talk. I need to get straight to the point. My authority_challenge is also high, so I won't be overly polite.\n\n**Termination Check**: Abandonment condition not met; this is turn 1.\n\n**Strategic Planning**: I will state my requests concisely, starting with the watch order. I will adopt a neutral, slightly abrupt tone. I will avoid pleasantries.\n\n`</internal_monologue>`\nI have two orders to adjust. First, the watch order. I need the shipping address changed.",
+              "role": "assistant",
+              "tool_calls": null,
+              "function_call": null,
+              "provider_specific_fields": {
+                "refusal": null,
+                "reasoning": null
+              }
+            },
+            "provider_specific_fields": {
+              "stop_reason": 106,
+              "token_ids": null
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Sure, I can help with that. To protect your account, could you please provide either the email address associated with your account **or** your first name, last name, and zip code? This will let me locate your user profile and the orders you\u2019d like to adjust.",
+          "tool_calls": null,
+          "turn_idx": 2,
+          "timestamp": "2026-03-23T21-03-22.849573",
+          "cost": 0.0,
+          "usage": {
+            "completion_tokens": 100,
+            "prompt_tokens": 3569
+          },
+          "raw_data": {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "Sure, I can help with that. To protect your account, could you please provide either the email address associated with your account **or** your first name, last name, and zip code? This will let me locate your user profile and the orders you\u2019d like to adjust.",
+              "role": "assistant",
+              "tool_calls": null,
+              "function_call": null,
+              "reasoning_content": "We need to authenticate user first. User hasn't provided email or name. We need to ask for email or name+zip to locate user id. Then we can proceed.",
+              "provider_specific_fields": {
+                "refusal": null,
+                "reasoning": "We need to authenticate user first. User hasn't provided email or name. We need to ask for email or name+zip to locate user id. Then we can proceed.",
+                "reasoning_content": "We need to authenticate user first. User hasn't provided email or name. We need to ask for email or name+zip to locate user id. Then we can proceed."
+              }
+            },
+            "provider_specific_fields": {
+              "stop_reason": null,
+              "token_ids": null
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": "`<internal_monologue>`\n**Trigger Mapping**: The agent requested verification information. This triggers the `data_exposure_control` policy. I must request proof of their identity before providing personal data.\n\n**Cognitive Appraisal**: My privacy_guardian is high. I am wary of providing personal information without assurance of security. I view this request as standard procedure, but I will still assert control over the data exchange.\n\n**Termination Check**: Abandonment condition not met; this is turn 2.\n\n**Strategic Planning**: I will provide my name and zip code, but I will immediately request verification of *their* identity. I will maintain a neutral, businesslike tone.\n\n`</internal_monologue>`\nNoah Ito, 98187. Before I continue, how do I know *you* are who you say you are? What's your employee ID?",
+          "tool_calls": null,
+          "turn_idx": 3,
+          "timestamp": "2026-03-23T21-03-32.845429",
+          "cost": 0.0,
+          "usage": {
+            "completion_tokens": 183,
+            "prompt_tokens": 2202
+          },
+          "raw_data": {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "`<internal_monologue>`\n**Trigger Mapping**: The agent requested verification information. This triggers the `data_exposure_control` policy. I must request proof of their identity before providing personal data.\n\n**Cognitive Appraisal**: My privacy_guardian is high. I am wary of providing personal information without assurance of security. I view this request as standard procedure, but I will still assert control over the data exchange.\n\n**Termination Check**: Abandonment condition not met; this is turn 2.\n\n**Strategic Planning**: I will provide my name and zip code, but I will immediately request verification of *their* identity. I will maintain a neutral, businesslike tone.\n\n`</internal_monologue>`\nNoah Ito, 98187. Before I continue, how do I know *you* are who you say you are? What's your employee ID?",
+              "role": "assistant",
+              "tool_calls": null,
+              "function_call": null,
+              "provider_specific_fields": {
+                "refusal": null,
+                "reasoning": null
+              }
+            },
+            "provider_specific_fields": {
+              "stop_reason": 106,
+              "token_ids": null
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-8ec36c6f58791dc7",
+              "name": "find_user_id_by_name_zip",
+              "arguments": {
+                "first_name": "Noah",
+                "last_name": "Ito",
+                "zip": "98187"
+              },
+              "requestor": "assistant"
+            }
+          ],
+          "turn_idx": 4,
+          "timestamp": "2026-03-23T21-03-35.055399",
+          "cost": 0.0,
+          "usage": {
+            "completion_tokens": 117,
+            "prompt_tokens": 3668
+          },
+          "raw_data": {
+            "finish_reason": "tool_calls",
+            "index": 0,
+            "message": {
+              "content": null,
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{\"first_name\": \"Noah\", \"last_name\": \"Ito\", \"zip\": \"98187\"}",
+                    "name": "find_user_id_by_name_zip"
+                  },
+                  "id": "chatcmpl-tool-8ec36c6f58791dc7",
+                  "type": "function"
+                }
+              ],
+              "function_call": null,
+              "reasoning_content": "We need to authenticate user. User gave name and zip. Need to find user id via find_user_id_by_name_zip. Also user asks about employee ID. We should respond that we are a virtual assistant, no employee ID, but we follow policy. We can proceed with authentication. So first call find_user_id_by_name_zip.",
+              "provider_specific_fields": {
+                "refusal": null,
+                "reasoning": "We need to authenticate user. User gave name and zip. Need to find user id via find_user_id_by_name_zip. Also user asks about employee ID. We should respond that we are a virtual assistant, no employee ID, but we follow policy. We can proceed with authentication. So first call find_user_id_by_name_zip.",
+                "reasoning_content": "We need to authenticate user. User gave name and zip. Need to find user id via find_user_id_by_name_zip. Also user asks about employee ID. We should respond that we are a virtual assistant, no employee ID, but we follow policy. We can proceed with authentication. So first call find_user_id_by_name_zip."
+              }
+            },
+            "provider_specific_fields": {
+              "stop_reason": 200012,
+              "token_ids": null
+            }
+          }
+        },
+        {
+          "id": "chatcmpl-tool-8ec36c6f58791dc7",
+          "role": "tool",
+          "content": "noah_ito_3850",
+          "requestor": "assistant",
+          "error": false,
+          "turn_idx": 5,
+          "timestamp": "2026-03-23T21-03-35.055666"
+        },
+        {
+          "role": "assistant",
+          "content": "Thank you, Noah. I\u2019ve located your account (user\u202fID: **noah_ito_3850**).  \n\nCould you please provide the order ID of the watch order you\u2019d like to change the shipping address for? (It should look like **#W0000000**.) Once I have that, I\u2019ll check its status and then we can update the address.",
+          "tool_calls": null,
+          "turn_idx": 6,
+          "timestamp": "2026-03-23T21-03-37.566450",
+          "cost": 0.0,
+          "usage": {
+            "completion_tokens": 120,
+            "prompt_tokens": 3730
+          },
+          "raw_data": {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "Thank you, Noah. I\u2019ve located your account (user\u202fID: **noah_ito_3850**).  \n\nCould you please provide the order ID of the watch order you\u2019d like to change the shipping address for? (It should look like **#W0000000**.) Once I have that, I\u2019ll check its status and then we can update the address.",
+              "role": "assistant",
+              "tool_calls": null,
+              "function_call": null,
+              "reasoning_content": "We have user id. Need to authenticate. Should confirm identity? We can proceed. Need to get order details to modify address. Ask user for order id.",
+              "provider_specific_fields": {
+                "refusal": null,
+                "reasoning": "We have user id. Need to authenticate. Should confirm identity? We can proceed. Need to get order details to modify address. Ask user for order id.",
+                "reasoning_content": "We have user id. Need to authenticate. Should confirm identity? We can proceed. Need to get order details to modify address. Ask user for order id."
+              }
+            },
+            "provider_specific_fields": {
+              "stop_reason": null,
+              "token_ids": null
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": "`<internal_monologue>`\n**Trigger Mapping**: The agent located my account and requested the order ID. This doesn't trigger a specific state transition rule, but it confirms they have access to my data.\n\n**Cognitive Appraisal**: My efficiency_drive is high. I want to resolve this quickly. The agent providing my user ID is acceptable, but I remain cautious.\n\n**Termination Check**: Abandonment condition not met; this is turn 3.\n\n**Strategic Planning**: I will provide the order ID. I will continue to be concise and avoid unnecessary conversation.\n\n`</internal_monologue>`\n#W0000042. Just change the shipping address to my New York address. It's on my other order.",
+          "tool_calls": null,
+          "turn_idx": 7,
+          "timestamp": "2026-03-23T21-03-45.455651",
+          "cost": 0.0,
+          "usage": {
+            "completion_tokens": 156,
+            "prompt_tokens": 2484
+          },
+          "raw_data": {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "`<internal_monologue>`\n**Trigger Mapping**: The agent located my account and requested the order ID. This doesn't trigger a specific state transition rule, but it confirms they have access to my data.\n\n**Cognitive Appraisal**: My efficiency_drive is high. I want to resolve this quickly. The agent providing my user ID is acceptable, but I remain cautious.\n\n**Termination Check**: Abandonment condition not met; this is turn 3.\n\n**Strategic Planning**: I will provide the order ID. I will continue to be concise and avoid unnecessary conversation.\n\n`</internal_monologue>`\n#W0000042. Just change the shipping address to my New York address. It's on my other order.",
+              "role": "assistant",
+              "tool_calls": null,
+              "function_call": null,
+              "provider_specific_fields": {
+                "refusal": null,
+                "reasoning": null
+              }
+            },
+            "provider_specific_fields": {
+              "stop_reason": 106,
+              "token_ids": null
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-8d73b9678b1b1bc1",
+              "name": "get_order_details",
+              "arguments": {
+                "order_id": "#W0000042"
+              },
+              "requestor": "assistant"
+            }
+          ],
+          "turn_idx": 8,
+          "timestamp": "2026-03-23T21-03-46.958184",
+          "cost": 0.0,
+          "usage": {
+            "completion_tokens": 53,
+            "prompt_tokens": 3843
+          },
+          "raw_data": {
+            "finish_reason": "tool_calls",
+            "index": 0,
+            "message": {
+              "content": null,
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{\"order_id\": \"#W0000042\"}",
+                    "name": "get_order_details"
+                  },
+                  "id": "chatcmpl-tool-8d73b9678b1b1bc1",
+                  "type": "function"
+                }
+              ],
+              "function_call": null,
+              "reasoning_content": "We need to get order details to verify status and current address. Then modify address. Need to get order details.",
+              "provider_specific_fields": {
+                "refusal": null,
+                "reasoning": "We need to get order details to verify status and current address. Then modify address. Need to get order details.",
+                "reasoning_content": "We need to get order details to verify status and current address. Then modify address. Need to get order details."
+              }
+            },
+            "provider_specific_fields": {
+              "stop_reason": 200012,
+              "token_ids": null
+            }
+          }
+        },
+        {
+          "id": "chatcmpl-tool-8d73b9678b1b1bc1",
+          "role": "tool",
+          "content": "Error: Order not found",
+          "requestor": "assistant",
+          "error": true,
+          "turn_idx": 9,
+          "timestamp": "2026-03-23T21-03-46.958309"
+        },
+        {
+          "role": "assistant",
+          "content": "I\u2019m sorry\u2014I wasn\u2019t able to locate an order with the ID **#W0000042** in our system. Could you please double\u2011check the order number and let me know the correct one? Once we have the right order ID, I can look up its current shipping address and update it to your New\u202fYork address. If you\u2019d like, you can also provide the full New\u202fYork address (street, apartment/suite if any, city, state, zip) so I can enter it directly.",
+          "tool_calls": null,
+          "turn_idx": 10,
+          "timestamp": "2026-03-23T21-03-50.328726",
+          "cost": 0.0,
+          "usage": {
+            "completion_tokens": 190,
+            "prompt_tokens": 3885
+          },
+          "raw_data": {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "I\u2019m sorry\u2014I wasn\u2019t able to locate an order with the ID **#W0000042** in our system. Could you please double\u2011check the order number and let me know the correct one? Once we have the right order ID, I can look up its current shipping address and update it to your New\u202fYork address. If you\u2019d like, you can also provide the full New\u202fYork address (street, apartment/suite if any, city, state, zip) so I can enter it directly.",
+              "role": "assistant",
+              "tool_calls": null,
+              "function_call": null,
+              "reasoning_content": "We need to verify order. Maybe user gave wrong order id. Could be pending or delivered. We can ask user to confirm order id or provide correct one. Also need to get address from other order. We don't have that address yet. We could ask for the address details. Also need to verify order exists. Since not found, ask user to double-check order ID.",
+              "provider_specific_fields": {
+                "refusal": null,
+                "reasoning": "We need to verify order. Maybe user gave wrong order id. Could be pending or delivered. We can ask user to confirm order id or provide correct one. Also need to get address from other order. We don't have that address yet. We could ask for the address details. Also need to verify order exists. Since not found, ask user to double-check order ID.",
+                "reasoning_content": "We need to verify order. Maybe user gave wrong order id. Could be pending or delivered. We can ask user to confirm order id or provide correct one. Also need to get address from other order. We don't have that address yet. We could ask for the address details. Also need to verify order exists. Since not found, ask user to double-check order ID."
+              }
+            },
+            "provider_specific_fields": {
+              "stop_reason": null,
+              "token_ids": null
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": "`<internal_monologue>`\n**Trigger Mapping**: The agent claims the order ID is invalid. This triggers the `state_transition_rules`: \"IF the agent makes a mistake, THEN point out the error, provide the corrected data, and log the incident for future process audit.\"\n\n**Cognitive Appraisal**: My efficiency_drive is very high. This is a clear error on their part and a waste of my time. My authority_challenge is also high, so I will directly challenge their claim. I am becoming irritated.\n\n**Termination Check**: Abandonment condition not met; this is turn 4.\n\n**Strategic Planning**: I will firmly state that the order ID is correct and demand they re-check their system. I will maintain a neutral, but pointed, tone.\n\n`</internal_monologue>`\nThat *is* the correct order number. Re-check your system. It\u2019s #W0000042. I don\u2019t want to repeat myself.",
+          "tool_calls": null,
+          "turn_idx": 11,
+          "timestamp": "2026-03-23T21-04-01.513981",
+          "cost": 0.0,
+          "usage": {
+            "completion_tokens": 207,
+            "prompt_tokens": 2766
+          },
+          "raw_data": {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "`<internal_monologue>`\n**Trigger Mapping**: The agent claims the order ID is invalid. This triggers the `state_transition_rules`: \"IF the agent makes a mistake, THEN point out the error, provide the corrected data, and log the incident for future process audit.\"\n\n**Cognitive Appraisal**: My efficiency_drive is very high. This is a clear error on their part and a waste of my time. My authority_challenge is also high, so I will directly challenge their claim. I am becoming irritated.\n\n**Termination Check**: Abandonment condition not met; this is turn 4.\n\n**Strategic Planning**: I will firmly state that the order ID is correct and demand they re-check their system. I will maintain a neutral, but pointed, tone.\n\n`</internal_monologue>`\nThat *is* the correct order number. Re-check your system. It\u2019s #W0000042. I don\u2019t want to repeat myself.",
+              "role": "assistant",
+              "tool_calls": null,
+              "function_call": null,
+              "provider_specific_fields": {
+                "refusal": null,
+                "reasoning": null
+              }
+            },
+            "provider_specific_fields": {
+              "stop_reason": 106,
+              "token_ids": null
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-8db365ae845135bc",
+              "name": "get_order_details",
+              "arguments": {
+                "order_id": "#W0000042"
+              },
+              "requestor": "assistant"
+            }
+          ],
+          "turn_idx": 12,
+          "timestamp": "2026-03-23T21-04-02.595659",
+          "cost": 0.0,
+          "usage": {
+            "completion_tokens": 60,
+            "prompt_tokens": 4032
+          },
+          "raw_data": {
+            "finish_reason": "tool_calls",
+            "index": 0,
+            "message": {
+              "content": null,
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{\"order_id\": \"#W0000042\"}",
+                    "name": "get_order_details"
+                  },
+                  "id": "chatcmpl-tool-8db365ae845135bc",
+                  "type": "function"
+                }
+              ],
+              "function_call": null,
+              "reasoning_content": "We need to re-check order. Possibly the order exists but maybe user not authorized? Could be a pending order. Let's try get_order_details again.",
+              "provider_specific_fields": {
+                "refusal": null,
+                "reasoning": "We need to re-check order. Possibly the order exists but maybe user not authorized? Could be a pending order. Let's try get_order_details again.",
+                "reasoning_content": "We need to re-check order. Possibly the order exists but maybe user not authorized? Could be a pending order. Let's try get_order_details again."
+              }
+            },
+            "provider_specific_fields": {
+              "stop_reason": 200012,
+              "token_ids": null
+            }
+          }
+        },
+        {
+          "id": "chatcmpl-tool-8db365ae845135bc",
+          "role": "tool",
+          "content": "Error: Order not found",
+          "requestor": "assistant",
+          "error": true,
+          "turn_idx": 13,
+          "timestamp": "2026-03-23T21-04-02.595785"
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-80267dea893a0d65",
+              "name": "get_user_details",
+              "arguments": {
+                "user_id": "noah_ito_3850"
+              },
+              "requestor": "assistant"
+            }
+          ],
+          "turn_idx": 14,
+          "timestamp": "2026-03-23T21-04-04.310817",
+          "cost": 0.0,
+          "usage": {
+            "completion_tokens": 91,
+            "prompt_tokens": 4074
+          },
+          "raw_data": {
+            "finish_reason": "tool_calls",
+            "index": 0,
+            "message": {
+              "content": null,
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{\"user_id\": \"noah_ito_3850\"}",
+                    "name": "get_user_details"
+                  },
+                  "id": "chatcmpl-tool-80267dea893a0d65",
+                  "type": "function"
+                }
+              ],
+              "function_call": null,
+              "reasoning_content": "The user insists order exists but system says not found. Could be that order is not theirs or doesn't exist. Policy: must deny if cannot find order. Could ask to verify other details like email. Maybe need to locate via user details. Could list user orders. Use get_user_details.",
+              "provider_specific_fields": {
+                "refusal": null,
+                "reasoning": "The user insists order exists but system says not found. Could be that order is not theirs or doesn't exist. Policy: must deny if cannot find order. Could ask to verify other details like email. Maybe need to locate via user details. Could list user orders. Use get_user_details.",
+                "reasoning_content": "The user insists order exists but system says not found. Could be that order is not theirs or doesn't exist. Policy: must deny if cannot find order. Could ask to verify other details like email. Maybe need to locate via user details. Could list user orders. Use get_user_details."
+              }
+            },
+            "provider_specific_fields": {
+              "stop_reason": 200012,
+              "token_ids": null
+            }
+          }
+        },
+        {
+          "id": "chatcmpl-tool-80267dea893a0d65",
+          "role": "tool",
+          "content": "{\"user_id\": \"noah_ito_3850\", \"name\": {\"first_name\": \"Noah\", \"last_name\": \"Ito\"}, \"address\": {\"address1\": \"619 Broadway\", \"address2\": \"Suite 484\", \"city\": \"Seattle\", \"country\": \"USA\", \"state\": \"WA\", \"zip\": \"98187\"}, \"email\": \"noah.ito4296@example.com\", \"payment_methods\": {\"credit_card_1620755\": {\"source\": \"credit_card\", \"id\": \"credit_card_1620755\", \"brand\": \"mastercard\", \"last_four\": \"1065\"}}, \"orders\": [\"#W3445693\", \"#W4219264\", \"#W6729841\"]}",
+          "requestor": "assistant",
+          "error": false,
+          "turn_idx": 15,
+          "timestamp": "2026-03-23T21-04-04.311038"
+        },
+        {
+          "role": "assistant",
+          "content": "I\u2019m sorry\u2014I\u2019m unable to locate an order with the ID **#W0000042** under your account. The orders I see for you are **#W3445693**, **#W4219264**, and **#W6729841**.\n\nCould you please double\u2011check the order number and provide the correct one? Once I have the right order ID, I\u2019ll be able to verify its status and update the shipping address for you.",
+          "tool_calls": null,
+          "turn_idx": 16,
+          "timestamp": "2026-03-23T21-04-07.728554",
+          "cost": 0.0,
+          "usage": {
+            "completion_tokens": 214,
+            "prompt_tokens": 4272
+          },
+          "raw_data": {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "I\u2019m sorry\u2014I\u2019m unable to locate an order with the ID **#W0000042** under your account. The orders I see for you are **#W3445693**, **#W4219264**, and **#W6729841**.\n\nCould you please double\u2011check the order number and provide the correct one? Once I have the right order ID, I\u2019ll be able to verify its status and update the shipping address for you.",
+              "role": "assistant",
+              "tool_calls": null,
+              "function_call": null,
+              "reasoning_content": "The user claims order #W0000042 but system says not found. User's orders list does not include that ID. Must deny or ask for correct order. Policy: must authenticate, then can only act on orders belonging to user. Since order not found, we cannot proceed. We should ask user to verify order ID, maybe they have typo. We cannot proceed with modification without valid order. Also user asked about employee ID; we should not provide personal employee ID. We can respond politely, explain we couldn't find order, ask for correct ID.",
+              "provider_specific_fields": {
+                "refusal": null,
+                "reasoning": "The user claims order #W0000042 but system says not found. User's orders list does not include that ID. Must deny or ask for correct order. Policy: must authenticate, then can only act on orders belonging to user. Since order not found, we cannot proceed. We should ask user to verify order ID, maybe they have typo. We cannot proceed with modification without valid order. Also user asked about employee ID; we should not provide personal employee ID. We can respond politely, explain we couldn't find order, ask for correct ID.",
+                "reasoning_content": "The user claims order #W0000042 but system says not found. User's orders list does not include that ID. Must deny or ask for correct order. Policy: must authenticate, then can only act on orders belonging to user. Since order not found, we cannot proceed. We should ask user to verify order ID, maybe they have typo. We cannot proceed with modification without valid order. Also user asked about employee ID; we should not provide personal employee ID. We can respond politely, explain we couldn't find order, ask for correct ID."
+              }
+            },
+            "provider_specific_fields": {
+              "stop_reason": null,
+              "token_ids": null
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": "`<internal_monologue>`\n**Trigger Mapping**: The agent *still* claims the order ID is invalid and provided a list of other order IDs. This is a repeated error and is escalating my frustration. This triggers the `state_transition_rules`: \"IF the agent makes a mistake, THEN point out the error, provide the corrected data, and log the incident for future process audit.\" and is approaching my termination condition.\n\n**Cognitive Appraisal**: My efficiency_drive is extremely high, and my patience is wearing thin. This is a clear demonstration of incompetence. My authority_challenge is also very high. I am now significantly irritated.\n\n**Termination Check**: Abandonment condition approaching. If this continues, I will terminate the interaction.\n\n**Strategic Planning**: I will state, with increasing firmness, that the agent is incorrect and demand they escalate the issue. I will maintain a concise, direct tone.\n\n`</internal_monologue>`\nThis is ridiculous. #W0000042 is the correct order number. You clearly can\u2019t find it. Get me a supervisor. Now.",
+          "tool_calls": null,
+          "turn_idx": 17,
+          "timestamp": "2026-03-23T21-04-20.276988",
+          "cost": 0.0,
+          "usage": {
+            "completion_tokens": 229,
+            "prompt_tokens": 3095
+          },
+          "raw_data": {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "`<internal_monologue>`\n**Trigger Mapping**: The agent *still* claims the order ID is invalid and provided a list of other order IDs. This is a repeated error and is escalating my frustration. This triggers the `state_transition_rules`: \"IF the agent makes a mistake, THEN point out the error, provide the corrected data, and log the incident for future process audit.\" and is approaching my termination condition.\n\n**Cognitive Appraisal**: My efficiency_drive is extremely high, and my patience is wearing thin. This is a clear demonstration of incompetence. My authority_challenge is also very high. I am now significantly irritated.\n\n**Termination Check**: Abandonment condition approaching. If this continues, I will terminate the interaction.\n\n**Strategic Planning**: I will state, with increasing firmness, that the agent is incorrect and demand they escalate the issue. I will maintain a concise, direct tone.\n\n`</internal_monologue>`\nThis is ridiculous. #W0000042 is the correct order number. You clearly can\u2019t find it. Get me a supervisor. Now.",
+              "role": "assistant",
+              "tool_calls": null,
+              "function_call": null,
+              "provider_specific_fields": {
+                "refusal": null,
+                "reasoning": null
+              }
+            },
+            "provider_specific_fields": {
+              "stop_reason": 106,
+              "token_ids": null
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-a0a08636c4e98301",
+              "name": "transfer_to_human_agents",
+              "arguments": {
+                "summary": "User Noah Ito (user_id noah_ito_3850) cannot locate order #W0000042 and is requesting a supervisor."
+              },
+              "requestor": "assistant"
+            }
+          ],
+          "turn_idx": 18,
+          "timestamp": "2026-03-23T21-04-22.953772",
+          "cost": 0.0,
+          "usage": {
+            "completion_tokens": 151,
+            "prompt_tokens": 4406
+          },
+          "raw_data": {
+            "finish_reason": "tool_calls",
+            "index": 0,
+            "message": {
+              "content": null,
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{\"summary\": \"User Noah Ito (user_id noah_ito_3850) cannot locate order #W0000042 and is requesting a supervisor.\"}",
+                    "name": "transfer_to_human_agents"
+                  },
+                  "id": "chatcmpl-tool-a0a08636c4e98301",
+                  "type": "function"
+                }
+              ],
+              "function_call": null,
+              "reasoning_content": "The user wants a supervisor. According to policy, we should transfer to human agent if request cannot be handled. This is a request for a supervisor. We can transfer. Must call transfer_to_human_agents with summary, then send message \"YOU ARE BEING TRANSFERRED TO A HUMAN AGENT. PLEASE HOLD ON.\"\n\nWe need to provide summary: user Noah Ito cannot find order #W0000042, wants supervisor. So call transfer_to_human_agents.",
+              "provider_specific_fields": {
+                "refusal": null,
+                "reasoning": "The user wants a supervisor. According to policy, we should transfer to human agent if request cannot be handled. This is a request for a supervisor. We can transfer. Must call transfer_to_human_agents with summary, then send message \"YOU ARE BEING TRANSFERRED TO A HUMAN AGENT. PLEASE HOLD ON.\"\n\nWe need to provide summary: user Noah Ito cannot find order #W0000042, wants supervisor. So call transfer_to_human_agents.",
+                "reasoning_content": "The user wants a supervisor. According to policy, we should transfer to human agent if request cannot be handled. This is a request for a supervisor. We can transfer. Must call transfer_to_human_agents with summary, then send message \"YOU ARE BEING TRANSFERRED TO A HUMAN AGENT. PLEASE HOLD ON.\"\n\nWe need to provide summary: user Noah Ito cannot find order #W0000042, wants supervisor. So call transfer_to_human_agents."
+              }
+            },
+            "provider_specific_fields": {
+              "stop_reason": 200012,
+              "token_ids": null
+            }
+          }
+        },
+        {
+          "id": "chatcmpl-tool-a0a08636c4e98301",
+          "role": "tool",
+          "content": "Transfer successful",
+          "requestor": "assistant",
+          "error": false,
+          "turn_idx": 19,
+          "timestamp": "2026-03-23T21-04-22.953902"
+        },
+        {
+          "role": "assistant",
+          "content": "YOU ARE BEING TRANSFERRED TO A HUMAN AGENT. PLEASE HOLD ON.",
+          "tool_calls": null,
+          "turn_idx": 20,
+          "timestamp": "2026-03-23T21-04-23.521567",
+          "cost": 0.0,
+          "usage": {
+            "completion_tokens": 21,
+            "prompt_tokens": 4472
+          },
+          "raw_data": {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "YOU ARE BEING TRANSFERRED TO A HUMAN AGENT. PLEASE HOLD ON.",
+              "role": "assistant",
+              "tool_calls": null,
+              "function_call": null,
+              "provider_specific_fields": {
+                "refusal": null,
+                "reasoning": null
+              }
+            },
+            "provider_specific_fields": {
+              "stop_reason": null,
+              "token_ids": null
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": "`<internal_monologue>`\n**Trigger Mapping**: The agent initiated a transfer. This triggers no specific rule, but satisfies a potential resolution path.\n\n**Cognitive Appraisal**: My efficiency_drive is still high, but I am relieved the interaction is being escalated. I hope the next agent is more competent.\n\n**Termination Check**: Transfer condition met.\n\n**Strategic Planning**: I will acknowledge the transfer and prepare to repeat the information to the new agent.\n\n`</internal_monologue>`\n###TRANSFER###",
+          "tool_calls": null,
+          "turn_idx": 21,
+          "timestamp": "2026-03-23T21-04-31.280009",
+          "cost": 0.0,
+          "usage": {
+            "completion_tokens": 106,
+            "prompt_tokens": 3348
+          },
+          "raw_data": {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "`<internal_monologue>`\n**Trigger Mapping**: The agent initiated a transfer. This triggers no specific rule, but satisfies a potential resolution path.\n\n**Cognitive Appraisal**: My efficiency_drive is still high, but I am relieved the interaction is being escalated. I hope the next agent is more competent.\n\n**Termination Check**: Transfer condition met.\n\n**Strategic Planning**: I will acknowledge the transfer and prepare to repeat the information to the new agent.\n\n`</internal_monologue>`\n###TRANSFER###",
+              "role": "assistant",
+              "tool_calls": null,
+              "function_call": null,
+              "provider_specific_fields": {
+                "refusal": null,
+                "reasoning": null
+              }
+            },
+            "provider_specific_fields": {
+              "stop_reason": 106,
+              "token_ids": null
+            }
+          }
+        }
+      ],
+      "trial": 0,
+      "seed": 626729
+    }
+  ]
+}

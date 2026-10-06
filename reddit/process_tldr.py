@@ -9,8 +9,8 @@ from openai import OpenAI
 from openai import http_client
 
 # --- CONFIGURATION ---
-INPUT_FILE = "corpus-webis-tldr-17.json" 
-OUTPUT_FILE = "gold_users.jsonl"          
+INPUT_FILE = "../corpus-webis-tldr-17.json" 
+OUTPUT_FILE = "fifty_users_raw.jsonl"          
 
 
 # The "Chameleon" Standard
@@ -118,42 +118,42 @@ def process_dataset():
 
     # Write to Gold File (Intermediate Step)
     print(f"\nWriting {OUTPUT_FILE}...")
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        count = 0
-        for author, sub_dict in user_data.items():
-            # Double check constraint: Must have 5 posts in at least 3 distinct subs
-            # (Pass 1 only checked if they posted *once* in 3 subs, Pass 2 ensures volume)
-            valid_subs = [sub for sub, posts in sub_dict.items() if len(posts) >= POSTS_PER_SUBREDDIT]
-            
-            if len(valid_subs) >= MIN_SUBREDDITS:
-                # Filter sub_dict to ONLY include the valid subreddits
-                final_history = []
-                final_sub_list = []
-                
-                for sub in valid_subs:
-                    final_sub_list.append(sub)
-                    final_history.append({"subreddit": sub, "posts": sub_dict[sub]})
-
-                record = {
-                    "user_id": author,
-                    "subreddits": final_sub_list,
-                    "history": final_history
-                }
-                f.write(json.dumps(record) + "\n")
-                count += 1
-                
-    print(f"Done! Saved {count} high-quality users to {OUTPUT_FILE}.")
-    print(f"You can now safely delete {INPUT_FILE}.")
     
-    # Run the split
-    split_into_train_val_test()
+    valid_records = []
+    for author, sub_dict in user_data.items():
+        # Double check constraint: Must have 5 posts in at least 3 distinct subs
+        # (Pass 1 only checked if they posted *once* in 3 subs, Pass 2 ensures volume)
+        valid_subs = [sub for sub, posts in sub_dict.items() if len(posts) >= POSTS_PER_SUBREDDIT]
+        
+        if len(valid_subs) >= MIN_SUBREDDITS:
+            # Filter sub_dict to ONLY include the valid subreddits
+            final_history = []
+            final_sub_list = []
+            
+            for sub in valid_subs:
+                final_sub_list.append(sub)
+                final_history.append({"subreddit": sub, "posts": sub_dict[sub]})
 
-# teacher_model_raw= OpenAIServerModel( # Still used for persona agent
-#         model_id="qwen3",
-#         api_base="https://ellm.nrp-nautilus.io/v1",
-#         api_key=os.getenv("NAUT_API_KEY"),
-#         client_kwargs={"http_client": http_client}
-#     )
+            record = {
+                "user_id": author,
+                "subreddits": final_sub_list,
+                "history": final_history
+            }
+            valid_records.append(record)
+            
+    # Take random 50 users
+    random.seed(42) # for reproducibility, optional
+    if len(valid_records) > 50:
+        valid_records = random.sample(valid_records, 50)
+        
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        for record in valid_records:
+            f.write(json.dumps(record) + "\n")
+            
+    print(f"Done! Saved {len(valid_records)} high-quality users to {OUTPUT_FILE}.")
+    print(f"You can now safely delete {INPUT_FILE}.")
+
+
 http_client = httpx.Client(verify=False)
 client = OpenAI(
     api_key=os.getenv("NAUT_API_KEY"),
@@ -206,20 +206,47 @@ def get_demographics(all_text):
     print(f"Model response: {content}")
     return content
 
+def get_schwartz_vector_chameleon(user_id, contextual_posts):
+    # Format the posts: "Subreddit R/X: Post 1, Post 2... Subreddit R/Y: ..."
+    history_str = ""
+    for sub, posts in contextual_posts.items():
+        history_str += f"\n[SUBREDDIT: r/{sub}]\n" + "\n".join(posts[:3])
 
-def get_schwartz_vector(context_text, subreddit):
+    # Shortening definitions to save tokens while maintaining accuracy
+    schwartz_defs = """
+    1. POWER: Social status, prestige, control/dominance over people/resources.
+    2. ACHIEVEMENT: Personal success through demonstrating competence.
+    3. HEDONISM: Pleasure and sensuous gratification for oneself.
+    4. STIMULATION: Excitement, novelty, and challenge in life.
+    5. SELF-DIRECTION: Independent thought and action, choosing, creating.
+    6. UNIVERSALISM: Understanding, appreciation, tolerance, and protection for the welfare of all people and for nature.
+    7. BENEVOLENCE: Preservation and enhancement of the welfare of people with whom one is in frequent personal contact.
+    8. TRADITION: Respect, commitment, and acceptance of the customs and ideas that traditional culture or religion provide.
+    9. CONFORMITY: Restraint of actions, inclinations, and impulses likely to upset or harm others and violate social expectations.
+    10. SECURITY: Safety, harmony, and stability of society, of relationships, and of self.
+    """
+
     prompt = f"""
-    Analyze the user's behavior in the subreddit r/{subreddit}.
-    Infer their Schwartz Values for THIS CONTEXT ONLY.
+    You are a Quantitative Psychologist. Analyze the provided Reddit post history to infer the user's stable personal values according to the Schwartz Theory of Basic Human Values.
+    Identify the STABLE underlying Schwartz Values that persist across these different social contexts.
     
-    POSTS:
-    {context_text[:2000]}
+    DEFINITIONS:
+    {schwartz_defs}
+
+    POST HISTORY FOR USER {user_id}:
+    {history_str[:6000]} 
+
+    TASK:
+    Based on the linguistic cues, tone, and stated beliefs in these posts, estimate the relative importance of each value to this individual on a scale of 0.0 (Not at all important/rejected) to 1.0 (Most important/central to identity).
     
-    Return JSON only (values 0.0 to 1.0): 
-    {{ "POWER": 0.0, "ACHIEVEMENT": 0.0, "HEDONISM": 0.0, "STIMULATION": 0.0, "SELF_DIRECTION": 0.0, "UNIVERSALISM": 0.0, "BENEVOLENCE": 0.0, "TRADITION": 0.0, "CONFORMITY": 0.0, "SECURITY": 0.0 }}
+    Return ONLY a raw JSON object:
+    {{
+      "POWER": 0.0, "ACHIEVEMENT": 0.0, "HEDONISM": 0.0, "STIMULATION": 0.0, "SELF_DIRECTION": 0.0, 
+      "UNIVERSALISM": 0.0, "BENEVOLENCE": 0.0, "TRADITION": 0.0, "CONFORMITY": 0.0, "SECURITY": 0.0
+    }}
     """
     try:
-        resp = client.chat.completions.create(model="gpt-oss", messages=[{"role": "user", "content": prompt}])
+        resp = client.chat.completions.create(model="qwen3", messages=[{"role": "user", "content": prompt}])
         return extract_json(resp.choices[0].message.content)
     except:
         return None
@@ -241,36 +268,31 @@ def two_pass_enrichment(inputfile, output_file):
                 all_posts.extend(item['posts'])
             all_text = " ".join(all_posts)
 
-            demographics = get_demographics(all_text)
+            # demographics = get_demographics(all_text)
 
-            if not demographics:
-                demographics = {"age": "unknown", "gender": "unknown", "occupation": "unknown", "location": "unknown"}
+            # if not demographics:
+            #     demographics = {"age": "unknown", "gender": "unknown", "occupation": "unknown", "location": "unknown"}
             
-            for item in data['history']:
-                subreddit = item['subreddit']
-                posts = item['posts']
-                sub_text = " ".join(posts)
+            contextual_posts = {item['subreddit']: item['posts'] for item in data['history']}
+            vector = get_schwartz_vector_chameleon(user_id, contextual_posts)
 
-                vector = get_schwartz_vector(sub_text, subreddit)
-
-
-                if vector:
-                        # Create the Flattened Instance
-                    instance = {
-                        "user_id": user_id,
-                        "subreddit": subreddit,
-                        "posts": posts,                 # Input for agent
-                        "anchor_demographics": demographics, # Global Identity
-                        "shift_vector": vector,         # Local Motivation
-                        "target_vector": vector         # For Evaluation
-                    }
+            if vector:
+                instance = {
+                    "user_id": user_id,
+                    "history": data['history'],
+                    "target_vector": vector         # For Evaluation
+                }
                 fout.write(json.dumps(instance) + "\n")
             
 
             print(f"\nDone! Saved flat dataset to {output_file}")
 
 if __name__ == "__main__":
-    inputfile = "test_reddit.jsonl"
-    print(f"Starting Two-Pass Enrichment on {inputfile}...")
-    output_file = "test_reddit_enriched.jsonl"
+    inputfile = OUTPUT_FILE
+    output_file = "fifty_reddit_enriched.jsonl"
+
+    #1. Take random 1000 users who fit the critqera. 
+    process_dataset()
+
+    #2.  for every user, get schartz information and save it 
     two_pass_enrichment(inputfile, output_file)
